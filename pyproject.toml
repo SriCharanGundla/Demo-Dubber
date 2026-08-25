@@ -1,0 +1,37 @@
+[project]
+name = "demo-dubber"
+version = "0.1.0"
+description = "Streamlit app skeleton for timestamped demo-video transcription and Kokoro dubbing"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.3.3",
+    "openai>=1.107.0",
+    "pydantic>=2.11.9",
+    "pydantic-settings>=2.10.1",
+    "python-dotenv>=1.1.1",
+    "requests>=2.32.5",
+    "soundfile>=0.13.1",
+    "streamlit>=1.49.0",
+    "torch>=2.10.0",
+    "kokoro>=0.9.4",
+    "faster-whisper>=1.2.1",
+    "pip>=26.0.1",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.4",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
