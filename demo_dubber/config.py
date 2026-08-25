@@ -50,13 +50,21 @@ class Settings(BaseSettings):
         default="medium.en", alias="DEMO_DUBBER_LOCAL_WHISPER_MODEL"
     )
     local_whisper_device: str = Field(
-        default="cpu", alias="DEMO_DUBBER_LOCAL_WHISPER_DEVICE"
+        default="auto", alias="DEMO_DUBBER_LOCAL_WHISPER_DEVICE"
     )
     local_whisper_compute_type: str = Field(
         default="int8", alias="DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE"
     )
+    local_whisper_auto_compute_type: str = Field(
+        default="auto",
+        alias="DEMO_DUBBER_LOCAL_WHISPER_AUTO_COMPUTE_TYPE",
+    )
     local_whisper_beam_size: int = Field(
         default=5, alias="DEMO_DUBBER_LOCAL_WHISPER_BEAM_SIZE"
+    )
+    mlx_whisper_model: str = Field(
+        default="mlx-community/whisper-medium.en-mlx",
+        alias="DEMO_DUBBER_MLX_WHISPER_MODEL",
     )
     transcription_chunk_seconds: int = Field(
         default=600,
@@ -99,6 +107,17 @@ class Settings(BaseSettings):
         if self.max_kokoro_speed < self.kokoro_speed:
             raise ValueError(
                 "DEMO_DUBBER_MAX_KOKORO_SPEED must be at least KOKORO_SPEED"
+            )
+        if self.local_whisper_device.lower() not in {
+            "auto",
+            "cpu",
+            "cuda",
+            "mps",
+            "metal",
+        }:
+            raise ValueError(
+                "DEMO_DUBBER_LOCAL_WHISPER_DEVICE must be one of: "
+                "auto, cpu, cuda, mps, metal"
             )
         return self
 

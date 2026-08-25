@@ -49,9 +49,11 @@ export default function App() {
       .then(([projectResult, providerResult]) => {
         setProjects(projectResult.projects);
         setProviders(providerResult);
-        const defaultTranscription = providerResult.transcription.find(
-          (provider) => provider.configured,
-        );
+        const defaultTranscription =
+          providerResult.transcription.find(
+            (provider) => provider.default && provider.configured,
+          ) ||
+          providerResult.transcription.find((provider) => provider.configured);
         const defaultCleanup = providerResult.cleanup.find(
           (provider) => provider.configured,
         );
@@ -343,7 +345,7 @@ function Workspace({
               onValueChange={setTranscriptionProvider}
               options={providers.transcription.map((item) => ({
                 ...item,
-                label: `${item.label}${item.configured ? "" : " · key needed"}`,
+                label: `${item.label}${item.configured ? "" : " · unavailable"}`,
                 disabled: !item.configured,
               }))}
             />
@@ -367,7 +369,7 @@ function Workspace({
           </Button>
           {!providersReady && (
             <p className="mt-3 text-sm text-muted-foreground">
-              Add a cleanup-provider key to .env, then restart the API.
+              Configure an available cleanup provider, then restart the API.
             </p>
           )}
         </Card>

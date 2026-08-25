@@ -48,6 +48,31 @@ uv run streamlit run app.py
 # or: uv run streamlit run apps/streamlit/app.py
 ```
 
+### Local transcription devices
+
+Both UIs detect the transcription backends available on the current machine.
+The environment setting controls the default selection:
+
+```env
+# auto | cpu | cuda | mps
+DEMO_DUBBER_TRANSCRIPTION_PROVIDER=local
+DEMO_DUBBER_LOCAL_WHISPER_DEVICE=auto
+
+# faster-whisper settings for auto, cpu, and cuda
+DEMO_DUBBER_LOCAL_WHISPER_MODEL=medium.en
+DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8
+DEMO_DUBBER_LOCAL_WHISPER_AUTO_COMPUTE_TYPE=auto
+
+# MLX model used when device=mps on Apple Silicon
+DEMO_DUBBER_MLX_WHISPER_MODEL=mlx-community/whisper-medium.en-mlx
+```
+
+- `cpu` uses faster-whisper with CTranslate2.
+- `cuda` uses faster-whisper on a detected NVIDIA GPU.
+- `mps` or `metal` routes to MLX Whisper on Apple Silicon.
+- `auto` lets CTranslate2 choose its faster-whisper device. Set `mps` when MLX
+  should be the default on a Mac.
+
 ## Cleanup providers
 
 All cleanup responses are validated locally to preserve cue order, adjacent coverage, speaker boundaries, and trusted timestamps.

@@ -38,9 +38,15 @@ class ApiTests(unittest.TestCase):
             any(provider["configured"] for provider in providers["cleanup"])
         )
         self.assertEqual(
-            [provider["configured"] for provider in providers["transcription"]],
-            [False, True],
+            [provider["id"] for provider in providers["transcription"]],
+            ["openai", "local-auto", "local-cpu", "local-cuda", "local-mps"],
         )
+        transcription = {
+            provider["id"]: provider for provider in providers["transcription"]
+        }
+        self.assertFalse(transcription["openai"]["configured"])
+        self.assertTrue(transcription["local-auto"]["configured"])
+        self.assertTrue(transcription["local-cpu"]["configured"])
 
     def test_project_upload_list_and_delete(self) -> None:
         response = self.client.post(

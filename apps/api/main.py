@@ -17,10 +17,6 @@ from apps.api.jobs import InMemoryJobStore
 from demo_dubber.config import get_settings
 from demo_dubber.models import Cue, RenderArtifacts, Transcript
 from demo_dubber.services.ffmpeg import FFmpegService
-from demo_dubber.services.local_whisper_transcribe import (
-    LocalWhisperTranscriptionService,
-)
-from demo_dubber.services.openai_transcribe import OpenAITranscriptionService
 from demo_dubber.services.project_store import (
     SavedProjectState,
     create_project_output_dir,
@@ -35,6 +31,10 @@ from demo_dubber.services.provider_factory import (
 from demo_dubber.services.render_workflow import RenderWorkflow
 from demo_dubber.services.transcript_limits import apply_char_limits
 from demo_dubber.services.transcript_validation import validate_transcript_timeline
+from demo_dubber.services.transcription_factory import (
+    build_transcription_service,
+    transcription_provider_catalog,
+)
 from demo_dubber.services.transcription_workflow import TranscriptionWorkflow
 from demo_dubber.ui.render_panel import generate_narration
 from demo_dubber.utils.files import safe_filename
@@ -64,7 +64,9 @@ app.add_middleware(
 
 
 class TranscriptionRequest(BaseModel):
-    transcription_provider: Literal["openai", "local"] = "openai"
+    transcription_provider: Literal[
+        "openai", "local-auto", "local-cpu", "local-cuda", "local-mps"
+    ] = "local-auto"
     cleanup_provider: Literal["openai", "gemini", "openrouter"] = "openai"
 
 
@@ -106,16 +108,7 @@ def providers() -> dict[str, object]:
     return {
         "cleanup": [item.__dict__ for item in cleanup_provider_catalog(settings)],
         "transcription": [
-            {
-                "id": "openai",
-                "label": "OpenAI Whisper",
-                "configured": bool(settings.openai_api_key),
-            },
-            {
-                "id": "local",
-                "label": "Local faster-whisper",
-                "configured": True,
-            },
+            item.__dict__ for item in transcription_provider_catalog(settings)
         ],
     }
 
@@ -171,10 +164,18 @@ def transcribe_project(
     project = _project(project_id)
     if project.source_video is None or not project.source_video.exists():
         raise HTTPException(status_code=409, detail="Source video is missing")
-    if request.transcription_provider == "openai" and not settings.openai_api_key:
+    transcription_provider = next(
+        (
+            provider
+            for provider in transcription_provider_catalog(settings)
+            if provider.id == request.transcription_provider
+        ),
+        None,
+    )
+    if transcription_provider is None or not transcription_provider.configured:
         raise HTTPException(
             status_code=409,
-            detail="OpenAI transcription is not configured",
+            detail=f"{request.transcription_provider} transcription is unavailable",
         )
     cleanup_provider = next(
         (
@@ -199,18 +200,8 @@ def _run_transcription(
 ) -> None:
     jobs.update(job_id, status="running", message="Extracting and transcribing audio")
     try:
-        transcriber = (
-            LocalWhisperTranscriptionService(
-                model=settings.local_whisper_model,
-                device=settings.local_whisper_device,
-                compute_type=settings.local_whisper_compute_type,
-                beam_size=settings.local_whisper_beam_size,
-            )
-            if request.transcription_provider == "local"
-            else OpenAITranscriptionService(
-                api_key=settings.openai_api_key,
-                model=settings.transcription_model,
-            )
+        transcriber = build_transcription_service(
+            settings, request.transcription_provider
         )
         workflow = TranscriptionWorkflow(
             ffmpeg=FFmpegService(),
