@@ -75,6 +75,23 @@ class Settings(BaseSettings):
     cleanup_model: str = Field(
         default="gpt-5.6-luna", alias="DEMO_DUBBER_CLEANUP_MODEL"
     )
+    gemini_api_key: str | None = Field(default=None, alias="GEMINI_API_KEY")
+    gemini_base_url: str = Field(
+        default="https://generativelanguage.googleapis.com/v1beta/openai/",
+        alias="GEMINI_OPENAI_BASE_URL",
+    )
+    gemini_model: str = Field(default="gemini-3.7-flash", alias="GEMINI_MODEL")
+    openrouter_api_key: str | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    openrouter_base_url: str = Field(
+        default="https://openrouter.ai/api/v1",
+        alias="OPENROUTER_BASE_URL",
+    )
+    openrouter_model: str = Field(
+        default="google/gemini-3.7-flash",
+        alias="OPENROUTER_MODEL",
+    )
+    openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")
+    openrouter_app_name: str = Field(default="Demo Dubber", alias="OPENROUTER_APP_NAME")
     sample_rate: int = 24_000
 
     @model_validator(mode="after")

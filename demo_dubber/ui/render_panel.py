@@ -64,7 +64,7 @@ def process_render(settings: Settings) -> None:
         workflow = RenderWorkflow(
             settings=settings,
             ffmpeg=FFmpegService(),
-            narration_generator=_generate_narration,
+            narration_generator=generate_narration,
         )
         artifacts = workflow.run(
             cues=cues,
@@ -127,7 +127,7 @@ def _load_cues() -> list[Cue]:
     return [Cue(**cue) for cue in cue_dicts]
 
 
-def _generate_narration(
+def generate_narration(
     cues: list[Cue],
     media_asset: dict,
     settings: Settings,

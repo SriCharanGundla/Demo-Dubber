@@ -104,6 +104,16 @@ def load_project_state(output_dir: Path) -> SavedProjectState | None:
         return None
 
 
+def save_project_state(project: SavedProjectState) -> SavedProjectState:
+    """Persist a framework-independent project snapshot atomically."""
+    ensure_directories(project.output_dir)
+    atomic_write_text(
+        project.output_dir / PROJECT_STATE_FILENAME,
+        project.model_dump_json(indent=2),
+    )
+    return project
+
+
 def delete_project(project: SavedProjectState, outputs_root: Path) -> None:
     project_dir = ensure_path_within(outputs_root, project.output_dir)
     if project_dir == outputs_root.resolve():
@@ -158,9 +168,7 @@ def save_session_project(
         updated_at=now,
     )
 
-    state_path = output_dir / PROJECT_STATE_FILENAME
-    atomic_write_text(state_path, project.model_dump_json(indent=2))
-    return project
+    return save_project_state(project)
 
 
 def restore_project_session(

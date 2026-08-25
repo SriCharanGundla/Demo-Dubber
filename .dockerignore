@@ -1,5 +1,7 @@
 .env
 .venv
+node_modules
+apps/web/dist
 .docker-data
 __pycache__
 .pytest_cache
