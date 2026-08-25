@@ -49,6 +49,16 @@ export default function App() {
       .then(([projectResult, providerResult]) => {
         setProjects(projectResult.projects);
         setProviders(providerResult);
+        const defaultTranscription = providerResult.transcription.find(
+          (provider) => provider.configured,
+        );
+        const defaultCleanup = providerResult.cleanup.find(
+          (provider) => provider.configured,
+        );
+        if (defaultTranscription) {
+          setTranscriptionProvider(defaultTranscription.id);
+        }
+        if (defaultCleanup) setCleanupProvider(defaultCleanup.id);
       })
       .catch((reason) => setError(reason.message));
   }, []);
@@ -284,6 +294,14 @@ function Workspace({
 }) {
   const hasTranscript = project.transcript_cues?.length > 0;
   const rendered = project.artifacts?.muxed_video;
+  const selectedTranscription = providers.transcription.find(
+    (provider) => provider.id === transcriptionProvider,
+  );
+  const selectedCleanup = providers.cleanup.find(
+    (provider) => provider.id === cleanupProvider,
+  );
+  const providersReady =
+    selectedTranscription?.configured && selectedCleanup?.configured;
   function editCue(index, text) {
     setProject({
       ...project,
@@ -323,7 +341,11 @@ function Workspace({
               label="Transcription"
               value={transcriptionProvider}
               onValueChange={setTranscriptionProvider}
-              options={providers.transcription}
+              options={providers.transcription.map((item) => ({
+                ...item,
+                label: `${item.label}${item.configured ? "" : " · key needed"}`,
+                disabled: !item.configured,
+              }))}
             />
             <Select
               label="Cleanup model"
@@ -332,12 +354,22 @@ function Workspace({
               options={providers.cleanup.map((item) => ({
                 ...item,
                 label: `${item.label}${item.configured ? "" : " · key needed"}`,
+                disabled: !item.configured,
               }))}
             />
           </div>
-          <Button className="mt-5" onClick={startTranscription}>
+          <Button
+            className="mt-5"
+            onClick={startTranscription}
+            disabled={!providersReady}
+          >
             <Sparkles size={17} /> Start transcription
           </Button>
+          {!providersReady && (
+            <p className="mt-3 text-sm text-muted-foreground">
+              Add a cleanup-provider key to .env, then restart the API.
+            </p>
+          )}
         </Card>
       )}
       {hasTranscript && (

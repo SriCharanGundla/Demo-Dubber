@@ -14,7 +14,12 @@ class ApiTests(unittest.TestCase):
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.original_settings = api_module.settings
         api_module.settings = self.original_settings.model_copy(
-            update={"outputs_dir": Path(self.temporary_directory.name)}
+            update={
+                "outputs_dir": Path(self.temporary_directory.name),
+                "openai_api_key": None,
+                "gemini_api_key": None,
+                "openrouter_api_key": None,
+            }
         )
         self.client = TestClient(api_module.app)
 
@@ -28,6 +33,13 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(
             [provider["id"] for provider in providers["cleanup"]],
             ["openai", "gemini", "openrouter"],
+        )
+        self.assertFalse(
+            any(provider["configured"] for provider in providers["cleanup"])
+        )
+        self.assertEqual(
+            [provider["configured"] for provider in providers["transcription"]],
+            [False, True],
         )
 
     def test_project_upload_list_and_delete(self) -> None:

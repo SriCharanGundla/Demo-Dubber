@@ -19,7 +19,8 @@ export function Select({ value, onValueChange, options, label }) {
                 <SelectPrimitive.Item
                   key={option.id}
                   value={option.id}
-                  className="relative flex cursor-pointer select-none items-center rounded-md py-2 pl-8 pr-4 text-sm outline-none focus:bg-muted"
+                  disabled={option.disabled}
+                  className="relative flex cursor-pointer select-none items-center rounded-md py-2 pl-8 pr-4 text-sm outline-none focus:bg-muted data-[disabled]:cursor-not-allowed data-[disabled]:opacity-45"
                 >
                   <SelectPrimitive.ItemIndicator className="absolute left-2">
                     <Check size={14} />

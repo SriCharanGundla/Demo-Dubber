@@ -106,8 +106,16 @@ def providers() -> dict[str, object]:
     return {
         "cleanup": [item.__dict__ for item in cleanup_provider_catalog(settings)],
         "transcription": [
-            {"id": "openai", "label": "OpenAI Whisper"},
-            {"id": "local", "label": "Local faster-whisper"},
+            {
+                "id": "openai",
+                "label": "OpenAI Whisper",
+                "configured": bool(settings.openai_api_key),
+            },
+            {
+                "id": "local",
+                "label": "Local faster-whisper",
+                "configured": True,
+            },
         ],
     }
 
@@ -163,6 +171,24 @@ def transcribe_project(
     project = _project(project_id)
     if project.source_video is None or not project.source_video.exists():
         raise HTTPException(status_code=409, detail="Source video is missing")
+    if request.transcription_provider == "openai" and not settings.openai_api_key:
+        raise HTTPException(
+            status_code=409,
+            detail="OpenAI transcription is not configured",
+        )
+    cleanup_provider = next(
+        (
+            provider
+            for provider in cleanup_provider_catalog(settings)
+            if provider.id == request.cleanup_provider
+        ),
+        None,
+    )
+    if cleanup_provider is None or not cleanup_provider.configured:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{request.cleanup_provider} cleanup is not configured",
+        )
     job = jobs.create(project_id, "transcription")
     background_tasks.add_task(_run_transcription, job.id, project, request)
     return job.as_dict()
