@@ -1,6 +1,6 @@
 # Demo Dubber
 
-Demo Dubber turns a narrated demo video into an editable, timestamp-safe transcript and a Kokoro-voiced MP4. The current branch is a pnpm/uv monorepo with a React web client and FastAPI backend. The original Streamlit app remains available and is tagged as `streamlit-v1`.
+Demo Dubber turns a narrated demo video into an editable, timestamp-safe transcript and a Kokoro-voiced MP4. It combines a React web client, FastAPI backend, and shared Python processing services. The original Streamlit app remains available under the `streamlit-v1` tag.
 
 ## Architecture
 
@@ -24,14 +24,27 @@ The React app uses a resumable four-stage flow:
 
 Renaming changes only the displayed title. The project ID and URLs stay stable.
 
-## Requirements
+## Quick start with Docker
+
+Requirements: Docker Desktop or OrbStack, plus a key for each hosted provider you select.
+
+```bash
+cp .env.example .env
+./deploy.sh
+```
+
+Open `http://localhost:8000`. The first image build downloads the transcription and Kokoro models; later builds reuse Docker's cached layers.
+
+## Develop from source
+
+Requirements:
 
 - Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22+, and pnpm 11+
 - `ffmpeg` and `ffprobe`
-- An OpenAI key for hosted transcription, or local faster-whisper
+- An OpenAI key for hosted transcription, or a supported local transcription backend
 - A key for the selected transcript-cleanup provider
 
-## Setup and run
+Install dependencies and start both development servers:
 
 ```bash
 cp .env.example .env
@@ -136,14 +149,9 @@ uv run python scripts/cleanup_generated.py --older-than-days 30
 uv run python scripts/cleanup_generated.py --older-than-days 30 --apply
 ```
 
-## Docker deployments
+## Docker details
 
-The supported deployment is the FastAPI + compiled React image:
-
-```bash
-./deploy.sh
-# open http://localhost:8000
-```
+`deploy.sh` builds the supported FastAPI + compiled React image.
 
 The deployment binds to `127.0.0.1` by default so project media and processing
 operations are not exposed to the local network.
@@ -170,3 +178,7 @@ an active job, and completed artifacts remain resumable from disk.
 The API persists job outcomes under `outputs/.jobs.json`. Restarting the
 container marks an interrupted active job as failed with its last processing
 phase, while completed project data and render checkpoints remain on disk.
+
+## License
+
+Demo Dubber is available under the [MIT License](./LICENSE).
