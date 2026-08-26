@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 import threading
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
+
+from demo_dubber.utils.files import atomic_write_json
 
 JobStatus = Literal["queued", "running", "succeeded", "failed"]
 ACTIVE_STATUSES = {"queued", "running"}
@@ -45,11 +49,13 @@ class Job:
 
 
 class InMemoryJobStore:
-    """Thread-safe local job state; replace with a durable queue for multi-worker use."""
+    """Thread-safe job state with optional durable outcome persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, storage_path: Path | None = None) -> None:
         self._jobs: dict[str, Job] = {}
         self._lock = threading.Lock()
+        self._storage_path = storage_path
+        self._load()
 
     def create(self, project_id: str, kind: str) -> Job:
         with self._lock:
@@ -67,6 +73,7 @@ class InMemoryJobStore:
                 )
             job = Job(id=uuid.uuid4().hex, project_id=project_id, kind=kind)
             self._jobs[job.id] = job
+            self._persist()
         return job
 
     def get(self, job_id: str) -> Job | None:
@@ -97,4 +104,46 @@ class InMemoryJobStore:
             for name, value in changes.items():
                 setattr(job, name, value)
             job.updated_at = datetime.now(UTC)
+            self._persist()
             return job
+
+    def _load(self) -> None:
+        if self._storage_path is None or not self._storage_path.is_file():
+            return
+        try:
+            payload = json.loads(self._storage_path.read_text())
+            for item in payload.get("jobs", []):
+                job = Job(
+                    **{
+                        **item,
+                        "created_at": datetime.fromisoformat(item["created_at"]),
+                        "updated_at": datetime.fromisoformat(item["updated_at"]),
+                    }
+                )
+                if job.status in ACTIVE_STATUSES:
+                    job.failed_at = job.message
+                    job.status = "failed"
+                    job.message = "Job interrupted"
+                    job.error = "The backend restarted before this job completed."
+                    job.updated_at = datetime.now(UTC)
+                self._jobs[job.id] = job
+            self._persist()
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            self._jobs = {}
+
+    def _persist(self) -> None:
+        if self._storage_path is None:
+            return
+        atomic_write_json(
+            self._storage_path,
+            {
+                "jobs": [
+                    {
+                        **job.as_dict(),
+                        "created_at": job.created_at.isoformat(),
+                        "updated_at": job.updated_at.isoformat(),
+                    }
+                    for job in self._jobs.values()
+                ]
+            },
+        )

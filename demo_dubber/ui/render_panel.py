@@ -238,9 +238,7 @@ def generate_narration(
         results.append(result)
         speed_positions[cue.index] = min(
             range(len(speed_steps)),
-            key=lambda position: abs(
-                speed_steps[position] - result.applied_speed
-            ),
+            key=lambda position: abs(speed_steps[position] - result.applied_speed),
         )
         _save_cached_result(
             progress_path=progress_path,

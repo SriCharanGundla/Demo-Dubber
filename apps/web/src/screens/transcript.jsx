@@ -298,7 +298,7 @@ export function TranscriptScreen() {
                     <audio
                       className="w-full"
                       controls
-                      src={preview.tts.natural_audio_url}
+                      src={api.mediaUrl(preview.tts.natural_audio_url)}
                     />
                   </div>
                   <div>
@@ -308,7 +308,7 @@ export function TranscriptScreen() {
                     <audio
                       className="w-full"
                       controls
-                      src={preview.tts.audio_url}
+                      src={api.mediaUrl(preview.tts.audio_url)}
                     />
                   </div>
                 </div>

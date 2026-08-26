@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,7 +13,7 @@ from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, s
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from apps.api.jobs import ActiveJobError, InMemoryJobStore
 from demo_dubber.config import get_settings
@@ -53,7 +54,7 @@ from demo_dubber.utils.files import safe_filename
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-jobs = InMemoryJobStore()
+jobs = InMemoryJobStore(settings.outputs_dir / ".jobs.json")
 
 app = FastAPI(
     title="Demo Dubber API",
@@ -83,8 +84,17 @@ class TranscriptionRequest(BaseModel):
     tts_voice: str = Field(default="af_heart", min_length=1, max_length=80)
 
 
+class CueTextUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    text: str = Field(min_length=1, max_length=settings.max_cue_text_chars)
+
+
 class TranscriptUpdate(BaseModel):
-    cues: list[Cue] = Field(min_length=1)
+    cues: list[CueTextUpdate] = Field(
+        min_length=1, max_length=settings.max_transcript_cues
+    )
 
 
 class ProjectUpdate(BaseModel):
@@ -92,7 +102,7 @@ class ProjectUpdate(BaseModel):
 
 
 class TTSPreviewRequest(BaseModel):
-    text: str = Field(min_length=1, max_length=5_000)
+    text: str = Field(min_length=1, max_length=settings.max_cue_text_chars)
     voice: str | None = None
     speed: float | None = Field(default=None, gt=0)
 
@@ -106,7 +116,17 @@ def _project(project_id: str) -> SavedProjectState:
 
 
 def _project_payload(project: SavedProjectState) -> dict[str, object]:
-    payload = project.model_dump(mode="json")
+    payload = project.model_dump(
+        mode="json", exclude={"output_dir", "source_video", "transcript"}
+    )
+    payload["media_asset"] = {
+        key: project.media_asset.get(key)
+        for key in ("duration_seconds", "width", "height")
+        if project.media_asset.get(key) is not None
+    }
+    payload["artifacts"] = {
+        name: True for name, path in project.artifacts.items() if path
+    }
     active_job = jobs.active_for_project(project.project_id)
     payload["active_job"] = active_job.as_dict() if active_job is not None else None
     return payload
@@ -127,6 +147,17 @@ def _project_cues(project: SavedProjectState) -> list[Cue]:
     return [Cue(**cue) for cue in project.transcript_cues]
 
 
+def _validate_transcript_resource_limits(cues: list[Cue]) -> None:
+    if len(cues) > settings.max_transcript_cues:
+        raise HTTPException(
+            status_code=422, detail="Transcript exceeds the configured cue limit"
+        )
+    if any(len(cue.text) > settings.max_cue_text_chars for cue in cues):
+        raise HTTPException(
+            status_code=422, detail="Transcript exceeds the configured cue text limit"
+        )
+
+
 def _cue_at(project: SavedProjectState, cue_index: int) -> tuple[list[Cue], int, Cue]:
     cues = _project_cues(project)
     position = next(
@@ -144,8 +175,16 @@ def _save_uploaded_file(upload: UploadFile, output_dir: Path) -> Path:
     os.close(descriptor)
     temporary_path = Path(temporary_name)
     try:
+        total_bytes = 0
         with temporary_path.open("wb") as destination:
-            shutil.copyfileobj(upload.file, destination, length=1024 * 1024)
+            while chunk := upload.file.read(1024 * 1024):
+                total_bytes += len(chunk)
+                if total_bytes > settings.max_upload_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                        detail="Video exceeds the configured upload size limit",
+                    )
+                destination.write(chunk)
         os.replace(temporary_path, target)
     except Exception:
         temporary_path.unlink(missing_ok=True)
@@ -188,9 +227,7 @@ def voices() -> dict[str, object]:
 @app.get("/api/voices/{voice_id}/sample")
 def voice_sample(voice_id: str) -> FileResponse:
     language_code = voice_id[0] if voice_id else ""
-    if not validate_voice(
-        settings.kokoro_voice_catalog, voice_id, language_code
-    ):
+    if not validate_voice(settings.kokoro_voice_catalog, voice_id, language_code):
         raise HTTPException(status_code=404, detail="Voice not found")
     sample_path = settings.kokoro_voice_samples_dir / f"{voice_id}.wav"
     if not sample_path.is_file():
@@ -220,13 +257,43 @@ def create_project(video: Annotated[UploadFile, File()]) -> dict[str, object]:
         raise HTTPException(status_code=415, detail="Unsupported video type")
 
     output_dir = create_project_output_dir(settings.outputs_dir, filename)
-    source_video = _save_uploaded_file(video, output_dir)
+    try:
+        source_video = _save_uploaded_file(video, output_dir)
+        media_asset = FFmpegService(settings.ffmpeg_timeout_seconds).probe_video(
+            source_video
+        )
+        if not media_asset.duration_seconds or media_asset.duration_seconds <= 0:
+            raise HTTPException(status_code=422, detail="Video has no usable duration")
+        if media_asset.duration_seconds > settings.max_video_duration_seconds:
+            raise HTTPException(
+                status_code=413,
+                detail="Video exceeds the configured duration limit",
+            )
+        if not media_asset.width or not media_asset.height:
+            raise HTTPException(status_code=422, detail="Video has no video stream")
+        if (
+            media_asset.width > settings.max_video_width
+            or media_asset.height > settings.max_video_height
+        ):
+            raise HTTPException(
+                status_code=413,
+                detail="Video exceeds the configured resolution limit",
+            )
+    except HTTPException:
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise
+    except (OSError, ValueError, subprocess.SubprocessError):
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=422, detail="Video could not be validated"
+        ) from None
     now = datetime.now(UTC)
     project = SavedProjectState(
         project_id=output_dir.name,
         title=filename,
         output_dir=output_dir.resolve(),
         source_video=source_video.resolve(),
+        media_asset=media_asset.model_dump(mode="json"),
         tts_voice=settings.kokoro_voice,
         tts_language=voice_language_code(settings.kokoro_voice),
         uploaded_filename=filename,
@@ -234,7 +301,7 @@ def create_project(video: Annotated[UploadFile, File()]) -> dict[str, object]:
         updated_at=now,
     )
     save_project_state(project)
-    return project.model_dump(mode="json")
+    return _project_payload(project)
 
 
 @app.get("/api/projects/{project_id}")
@@ -251,7 +318,7 @@ def update_project(project_id: str, update: ProjectUpdate) -> dict[str, object]:
         raise HTTPException(status_code=422, detail="Project name cannot be blank")
     saved = project.model_copy(update={"title": title, "updated_at": datetime.now(UTC)})
     save_project_state(saved)
-    return saved.model_dump(mode="json")
+    return _project_payload(saved)
 
 
 @app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -331,7 +398,7 @@ def _run_transcription(
             settings, request.transcription_provider
         )
         workflow = TranscriptionWorkflow(
-            ffmpeg=FFmpegService(),
+            ffmpeg=FFmpegService(settings.ffmpeg_timeout_seconds),
             transcriber=transcriber,
             cleaner=build_cleanup_service(settings, request.cleanup_provider),
             chunk_seconds=settings.transcription_chunk_seconds,
@@ -339,6 +406,7 @@ def _run_transcription(
             progress_callback=progress,
         )
         run = workflow.run(project.source_video, project.output_dir)
+        _validate_transcript_resource_limits(run.transcript.cues)
         transcript = apply_char_limits(
             run.transcript,
             settings.char_limit_margin,
@@ -367,14 +435,14 @@ def _run_transcription(
             )
         )
         jobs.update(job_id, status="succeeded", message="Transcript ready")
-    except Exception as exc:
+    except Exception:
         logger.exception("Transcription failed for project %s", project.project_id)
         current = jobs.get(job_id)
         jobs.update(
             job_id,
             status="failed",
             message="Transcription failed",
-            error=str(exc),
+            error="Transcription could not be completed. Check the server logs.",
             failed_at=current.message if current is not None else "Transcribing audio",
         )
 
@@ -414,20 +482,35 @@ def get_transcript(project_id: str) -> dict[str, object]:
 def update_transcript(project_id: str, update: TranscriptUpdate) -> dict[str, object]:
     project = _project(project_id)
     _require_idle_project(project_id)
+    stored_cues = _project_cues(project)
+    _validate_transcript_resource_limits(stored_cues)
+    expected_indexes = [cue.index for cue in stored_cues]
+    received_indexes = [cue.index for cue in update.cues]
+    if received_indexes != expected_indexes:
+        raise HTTPException(
+            status_code=422,
+            detail="Transcript cue indexes must match the stored transcript",
+        )
+    edited_text = {cue.index: cue.text.strip() for cue in update.cues}
+    if any(not text for text in edited_text.values()):
+        raise HTTPException(status_code=422, detail="Cue text cannot be blank")
     duration = project.media_asset.get("duration_seconds")
     transcript = validate_transcript_timeline(
         Transcript(
-            cues=update.cues, raw_response=project.transcript.get("raw_response", {})
+            cues=[
+                cue.model_copy(update={"text": edited_text[cue.index]})
+                for cue in stored_cues
+            ],
+            raw_response=project.transcript.get("raw_response", {}),
         ),
         total_duration=float(duration) if duration is not None else None,
     )
-    transcript = transcript.model_copy(
-        update={
-            "cues": [
-                cue.model_copy(update={"over_limit": len(cue.text) > cue.char_limit})
-                for cue in transcript.cues
-            ]
-        }
+    transcript = apply_char_limits(
+        transcript,
+        settings.char_limit_margin,
+        float(duration) if duration is not None else None,
+        settings.chars_per_second,
+        settings.guard_gap_ms,
     )
     saved = project.model_copy(
         update={
@@ -486,7 +569,7 @@ def original_cue_preview(project_id: str, kind: str, cue_index: int) -> FileResp
         f"{int(cue.end_seconds * 1000):08}{suffix}"
     )
     if not output_path.is_file():
-        ffmpeg = FFmpegService()
+        ffmpeg = FFmpegService(settings.ffmpeg_timeout_seconds)
         if kind == "audio":
             ffmpeg.extract_audio_clip(
                 audio_path=source,
@@ -542,7 +625,9 @@ def create_tts_preview(
         voice=selected_voice,
         speed=request.speed or settings.kokoro_speed,
     )
-    payload = preview.model_dump(mode="json", exclude={"audio_path", "natural_audio_path"})
+    payload = preview.model_dump(
+        mode="json", exclude={"audio_path", "natural_audio_path"}
+    )
     return {
         **payload,
         "audio_url": (
@@ -556,9 +641,7 @@ def create_tts_preview(
     }
 
 
-@app.get(
-    "/api/projects/{project_id}/previews/tts/{cue_index}/{signature}/{variant}"
-)
+@app.get("/api/projects/{project_id}/previews/tts/{cue_index}/{signature}/{variant}")
 def download_tts_preview(
     project_id: str, cue_index: int, signature: str, variant: str
 ) -> FileResponse:
@@ -588,6 +671,24 @@ def render_project(
     project = _project(project_id)
     if not project.transcript_cues:
         raise HTTPException(status_code=409, detail="Transcript is missing")
+    duration = project.media_asset.get("duration_seconds")
+    transcript = validate_transcript_timeline(
+        Transcript(cues=_project_cues(project)),
+        total_duration=float(duration) if duration is not None else None,
+    )
+    _validate_transcript_resource_limits(transcript.cues)
+    transcript = apply_char_limits(
+        transcript,
+        settings.char_limit_margin,
+        float(duration) if duration is not None else None,
+        settings.chars_per_second,
+        settings.guard_gap_ms,
+    )
+    if any(cue.over_limit for cue in transcript.cues):
+        raise HTTPException(
+            status_code=409,
+            detail="Shorten the over-limit transcript cues before exporting",
+        )
     try:
         job = jobs.create(project_id, "render")
     except ActiveJobError as exc:
@@ -612,7 +713,7 @@ def _run_render(job_id: str, project: SavedProjectState) -> None:
         )
         workflow = RenderWorkflow(
             settings=project_settings,
-            ffmpeg=FFmpegService(),
+            ffmpeg=FFmpegService(settings.ffmpeg_timeout_seconds),
             narration_generator=generate_narration,
         )
         artifacts = workflow.run(
@@ -633,15 +734,17 @@ def _run_render(job_id: str, project: SavedProjectState) -> None:
             )
         )
         jobs.update(job_id, status="succeeded", message="Render ready")
-    except Exception as exc:
+    except Exception:
         logger.exception("Render failed for project %s", project.project_id)
         current = jobs.get(job_id)
         jobs.update(
             job_id,
             status="failed",
             message="Render failed",
-            error=str(exc),
-            failed_at=current.message if current is not None else "Rendering dubbed demo",
+            error="The dubbed video could not be rendered. Check the server logs.",
+            failed_at=current.message
+            if current is not None
+            else "Rendering dubbed demo",
         )
 
 

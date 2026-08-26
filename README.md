@@ -124,6 +124,18 @@ See [.env.example](./.env.example) for transcription, timing, Kokoro, workspace,
 
 Project state and artifacts live under `outputs/`. Temporary workspace data lives under `workspace/`. Both can be relocated with environment variables.
 
+Uploads are validated for file size, playable duration, video dimensions, and
+FFmpeg execution time. The defaults support files up to 2 GiB, four hours, and
+8K resolution; override them with the limits documented in `.env.example`.
+
+Preview audio, render segments, and transcription chunks can be inspected or
+removed after a retention window:
+
+```bash
+uv run python scripts/cleanup_generated.py --older-than-days 30
+uv run python scripts/cleanup_generated.py --older-than-days 30 --apply
+```
+
 ## Docker deployments
 
 The supported deployment is the FastAPI + compiled React image:
@@ -132,6 +144,9 @@ The supported deployment is the FastAPI + compiled React image:
 ./deploy.sh
 # open http://localhost:8000
 ```
+
+The deployment binds to `127.0.0.1` by default so project media and processing
+operations are not exposed to the local network.
 
 The build downloads the configured faster-whisper model, Kokoro model, and all
 28 Kokoro English voice packs into the image. It also renders each voice's
@@ -152,8 +167,6 @@ Rendering and transcription continue when the browser tab is closed, as long as
 the Docker container remains running. Reopening a project reconnects the UI to
 an active job, and completed artifacts remain resumable from disk.
 
-The in-process API job store is intentionally a local single-process adapter.
-Restarting the container interrupts an active job, though completed project data
-and render checkpoints remain on disk. Before scaling the API to multiple
-workers or machines, replace it with a durable queue and persist job status
-externally; the frontend polling contract can stay unchanged.
+The API persists job outcomes under `outputs/.jobs.json`. Restarting the
+container marks an interrupted active job as failed with its last processing
+phase, while completed project data and render checkpoints remain on disk.

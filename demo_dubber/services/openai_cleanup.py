@@ -38,6 +38,21 @@ Return JSON only with this shape:
 }
 """
 
+
+def _is_unsupported_response_format_error(error: OpenAIError) -> bool:
+    status_code = getattr(error, "status_code", None)
+    message = str(error).lower()
+    mentions_format = any(
+        marker in message
+        for marker in ("response_format", "json_schema", "structured output")
+    )
+    mentions_unsupported = any(
+        marker in message
+        for marker in ("unsupported", "not supported", "unknown", "invalid")
+    )
+    return mentions_format and mentions_unsupported and status_code in {None, 400, 422}
+
+
 CLEANUP_RESPONSE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -257,9 +272,11 @@ class OpenAICompatibleChatCleanupService(TranscriptCleanupValidator):
                 response_format=response_format,
                 require_structured_parameters=self._require_structured_parameters,
             )
-        except OpenAIError:
+        except OpenAIError as exc:
             # Some OpenAI-compatible models do not implement json_schema. The
             # prompt still requires JSON, and local validation remains mandatory.
+            if not _is_unsupported_response_format_error(exc):
+                raise
             return self._request_and_validate(transcript, messages)
 
     def _request_and_validate(

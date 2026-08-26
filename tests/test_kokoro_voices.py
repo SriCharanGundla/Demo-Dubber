@@ -17,9 +17,7 @@ class KokoroVoiceCatalogTests(unittest.TestCase):
             {option["language"] for option in options},
             {"American English", "British English"},
         )
-        self.assertEqual(
-            {option["gender"] for option in options}, {"Female", "Male"}
-        )
+        self.assertEqual({option["gender"] for option in options}, {"Female", "Male"})
 
     def test_voice_and_language_must_match_catalog(self) -> None:
         self.assertTrue(validate_voice(self.catalog_path, "af_heart", "a"))

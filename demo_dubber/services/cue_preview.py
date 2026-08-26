@@ -153,12 +153,12 @@ def generate_tts_preview(
 def load_tts_preview(
     output_dir: Path, cue_index: int, signature: str
 ) -> CueTTSPreview | None:
-    if len(signature) != 64 or any(char not in "0123456789abcdef" for char in signature):
+    if len(signature) != 64 or any(
+        char not in "0123456789abcdef" for char in signature
+    ):
         return None
     stem = f"cue_{cue_index:04}_{signature[:24]}"
-    return _load_cached_preview(
-        output_dir / "editor_previews" / "tts" / f"{stem}.json"
-    )
+    return _load_cached_preview(output_dir / "editor_previews" / "tts" / f"{stem}.json")
 
 
 def _load_cached_preview(metadata_path: Path) -> CueTTSPreview | None:
@@ -170,9 +170,7 @@ def _load_cached_preview(metadata_path: Path) -> CueTTSPreview | None:
         return None
 
 
-def _final_cue_window_start(
-    cue: Cue, previous_cue: Cue, gap_seconds: float
-) -> float:
+def _final_cue_window_start(cue: Cue, previous_cue: Cue, gap_seconds: float) -> float:
     earliest_after_previous = previous_cue.end_seconds + gap_seconds
     return max(0.0, min(cue.start_seconds, earliest_after_previous))
 

@@ -40,6 +40,5 @@ def voice_options(catalog_path: Path, samples_dir: Path) -> list[dict[str, objec
 def validate_voice(catalog_path: Path, voice_id: str, language_code: str) -> bool:
     catalog = load_voice_catalog(catalog_path)
     return (
-        voice_id in catalog["voices"]
-        and voice_language_code(voice_id) == language_code
+        voice_id in catalog["voices"] and voice_language_code(voice_id) == language_code
     )

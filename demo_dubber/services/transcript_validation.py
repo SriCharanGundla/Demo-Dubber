@@ -20,22 +20,18 @@ def validate_transcript_timeline(
             "Transcript cue indexes must be consecutive and start at zero."
         )
 
-    previous_start = -1.0
+    previous_end = 0.0
     for cue in transcript.cues:
-        if cue.start_seconds < 0:
-            raise ValueError(
-                f"Cue {cue.index + 1} starts before the beginning of the video."
-            )
         if cue.end_seconds <= cue.start_seconds:
             raise ValueError(f"Cue {cue.index + 1} must end after it starts.")
-        if cue.start_seconds + TIMESTAMP_TOLERANCE_SECONDS < previous_start:
-            raise ValueError(f"Cue {cue.index + 1} starts before the previous cue.")
+        if cue.start_seconds + TIMESTAMP_TOLERANCE_SECONDS < previous_end:
+            raise ValueError(f"Cue {cue.index + 1} overlaps the previous cue.")
         if (
             total_duration is not None
             and cue.end_seconds > total_duration + TIMESTAMP_TOLERANCE_SECONDS
         ):
             raise ValueError(f"Cue {cue.index + 1} ends after the video duration.")
-        previous_start = cue.start_seconds
+        previous_end = cue.end_seconds
 
     return transcript
 

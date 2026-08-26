@@ -9,7 +9,7 @@ from demo_dubber.services.ffmpeg import FFmpegService
 class FFmpegServiceTests(unittest.TestCase):
     @patch("demo_dubber.services.ffmpeg.subprocess.run")
     def test_mux_copies_source_video_without_shortening_it(self, run: Mock) -> None:
-        service = FFmpegService()
+        service = FFmpegService(timeout_seconds=42)
         service.mux_audio(
             Path("source.webm"), Path("narration.wav"), Path("dubbed.mp4")
         )
@@ -18,6 +18,7 @@ class FFmpegServiceTests(unittest.TestCase):
         self.assertNotIn("-shortest", command)
         self.assertIn("-map_metadata", command)
         self.assertIn("+faststart", command)
+        self.assertEqual(run.call_args.kwargs["timeout"], 42)
 
     @patch("demo_dubber.services.ffmpeg.subprocess.run")
     def test_mux_uses_high_quality_fallback_for_incompatible_codec(

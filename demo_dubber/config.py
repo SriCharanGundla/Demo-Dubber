@@ -15,6 +15,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        populate_by_name=True,
     )
 
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
@@ -39,9 +40,34 @@ class Settings(BaseSettings):
         default=Path("workspace"), alias="DEMO_DUBBER_WORKSPACE"
     )
     outputs_dir: Path = Field(default=Path("outputs"), alias="DEMO_DUBBER_OUTPUTS")
-    guard_gap_ms: int = Field(default=120, alias="DEMO_DUBBER_GUARD_GAP_MS")
-    chars_per_second: float = Field(default=14.0, alias="DEMO_DUBBER_CHARS_PER_SECOND")
-    char_limit_margin: int = Field(default=10, alias="DEMO_DUBBER_CHAR_LIMIT_MARGIN")
+    guard_gap_ms: int = Field(default=120, ge=0, alias="DEMO_DUBBER_GUARD_GAP_MS")
+    chars_per_second: float = Field(
+        default=14.0, gt=0, alias="DEMO_DUBBER_CHARS_PER_SECOND"
+    )
+    char_limit_margin: int = Field(
+        default=10, ge=0, alias="DEMO_DUBBER_CHAR_LIMIT_MARGIN"
+    )
+    max_upload_bytes: int = Field(
+        default=2_147_483_648, gt=0, alias="DEMO_DUBBER_MAX_UPLOAD_BYTES"
+    )
+    max_video_duration_seconds: float = Field(
+        default=14_400, gt=0, alias="DEMO_DUBBER_MAX_VIDEO_DURATION_SECONDS"
+    )
+    max_video_width: int = Field(
+        default=7_680, gt=0, alias="DEMO_DUBBER_MAX_VIDEO_WIDTH"
+    )
+    max_video_height: int = Field(
+        default=4_320, gt=0, alias="DEMO_DUBBER_MAX_VIDEO_HEIGHT"
+    )
+    max_transcript_cues: int = Field(
+        default=5_000, gt=0, alias="DEMO_DUBBER_MAX_TRANSCRIPT_CUES"
+    )
+    max_cue_text_chars: int = Field(
+        default=5_000, gt=0, alias="DEMO_DUBBER_MAX_CUE_TEXT_CHARS"
+    )
+    ffmpeg_timeout_seconds: float = Field(
+        default=3_600, gt=0, alias="DEMO_DUBBER_FFMPEG_TIMEOUT_SECONDS"
+    )
     max_tempo_compression_ratio: float = Field(
         default=1.08,
         ge=1.0,
@@ -110,7 +136,7 @@ class Settings(BaseSettings):
     )
     openrouter_site_url: str | None = Field(default=None, alias="OPENROUTER_SITE_URL")
     openrouter_app_name: str = Field(default="Demo Dubber", alias="OPENROUTER_APP_NAME")
-    sample_rate: int = 24_000
+    sample_rate: int = Field(default=24_000, gt=0)
 
     @model_validator(mode="after")
     def validate_quality_limits(self) -> Settings:

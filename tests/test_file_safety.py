@@ -91,9 +91,7 @@ class FileSafetyTests(unittest.TestCase):
             mounted_project_dir = project_dir.resolve()
             self.assertEqual(errors, [])
             self.assertEqual(projects[0].output_dir, mounted_project_dir)
-            self.assertEqual(
-                projects[0].source_video, mounted_project_dir / "demo.mp4"
-            )
+            self.assertEqual(projects[0].source_video, mounted_project_dir / "demo.mp4")
             self.assertEqual(
                 projects[0].media_asset["extracted_audio"],
                 str(mounted_project_dir / "audio" / "source.wav"),

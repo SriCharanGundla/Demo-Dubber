@@ -96,3 +96,18 @@ class CompatibleCleanupTests(unittest.TestCase):
         self.assertEqual(cleaned.cues[0].text, "Hello world.")
         self.assertIn("response_format", completions.requests[0])
         self.assertNotIn("response_format", completions.requests[1])
+
+    def test_authentication_failure_is_not_retried(self) -> None:
+        service = OpenAICompatibleChatCleanupService(
+            base_url="https://example.test/v1",
+            token="test",
+            model="test-model",
+            provider_name="Test provider",
+        )
+        completions = FakeCompletions([OpenAIError("invalid API key")])
+        service._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+
+        with self.assertRaisesRegex(OpenAIError, "invalid API key"):
+            service.clean_timestamped_transcript(transcript())
+
+        self.assertEqual(len(completions.requests), 1)

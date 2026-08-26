@@ -112,10 +112,7 @@ def _rebase_project_paths(
     """Make paths portable when an outputs directory moves or is mounted."""
     previous_output_dir = project.output_dir
     updates: dict[str, object] = {"output_dir": output_dir}
-    if (
-        previous_output_dir == output_dir
-        or previous_output_dir.name != output_dir.name
-    ):
+    if previous_output_dir == output_dir or previous_output_dir.name != output_dir.name:
         return project.model_copy(update=updates)
 
     def rebase(value: object) -> object:
@@ -140,6 +137,7 @@ def _rebase_project_paths(
         artifacts=rebase(project.artifacts),
     )
     return project.model_copy(update=updates)
+
 
 def save_project_state(project: SavedProjectState) -> SavedProjectState:
     """Persist a framework-independent project snapshot atomically."""

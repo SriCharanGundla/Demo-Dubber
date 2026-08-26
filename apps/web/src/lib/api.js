@@ -1,4 +1,13 @@
-const API_ROOT = import.meta.env.VITE_API_URL || "/api";
+const API_ROOT = import.meta.env?.VITE_API_URL || "/api";
+
+export function resolveApiUrl(path, apiRoot = API_ROOT) {
+  if (!path || /^https?:\/\//i.test(path)) return path;
+  if (apiRoot === "/api") return path;
+  if (path.startsWith("/api/")) {
+    return `${apiRoot.replace(/\/api\/?$/, "")}${path}`;
+  }
+  return `${apiRoot}${path.startsWith("/") ? path : `/${path}`}`;
+}
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_ROOT}${path}`, options);
@@ -12,6 +21,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
+  mediaUrl: resolveApiUrl,
   providers: () => request("/providers"),
   voices: () => request("/voices"),
   projects: () => request("/projects"),
@@ -41,7 +51,9 @@ export const api = {
     request(`/projects/${id}/transcript`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cues }),
+      body: JSON.stringify({
+        cues: cues.map(({ index, text }) => ({ index, text })),
+      }),
     }),
   render: (id) => request(`/projects/${id}/render`, { method: "POST" }),
   artifact: (id, name) => `${API_ROOT}/projects/${id}/artifacts/${name}`,

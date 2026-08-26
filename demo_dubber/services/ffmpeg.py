@@ -8,21 +8,46 @@ from demo_dubber.models import MediaAsset
 
 
 class FFmpegService:
+    def __init__(self, timeout_seconds: float = 3_600) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    def _run(self, command: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=self._timeout_seconds,
+        )
+
     def probe_video(self, video_path: Path) -> MediaAsset:
         cmd = [
             "ffprobe",
             "-v",
             "error",
             "-show_entries",
-            "format=duration",
+            "format=duration:stream=codec_type,width,height",
             "-of",
             "json",
             str(video_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = self._run(cmd)
         payload = json.loads(result.stdout or "{}")
         duration = float(payload.get("format", {}).get("duration", 0.0))
-        return MediaAsset(source_video=video_path, duration_seconds=duration)
+        video_stream = next(
+            (
+                stream
+                for stream in payload.get("streams", [])
+                if stream.get("codec_type") == "video"
+            ),
+            {},
+        )
+        return MediaAsset(
+            source_video=video_path,
+            duration_seconds=duration,
+            width=video_stream.get("width"),
+            height=video_stream.get("height"),
+        )
 
     def extract_audio(self, video_path: Path, audio_path: Path) -> Path:
         audio_path.parent.mkdir(parents=True, exist_ok=True)
@@ -40,7 +65,7 @@ class FFmpegService:
             "pcm_s16le",
             str(audio_path),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        self._run(cmd)
         return audio_path
 
     def probe_video_codec(self, video_path: Path) -> str:
@@ -56,7 +81,7 @@ class FFmpegService:
             "default=noprint_wrappers=1:nokey=1",
             str(video_path),
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = self._run(cmd)
         return result.stdout.strip().lower()
 
     def extract_audio_clip(
@@ -85,7 +110,7 @@ class FFmpegService:
             "pcm_s16le",
             str(output_path),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        self._run(cmd)
         return output_path
 
     def extract_video_clip(
@@ -124,11 +149,12 @@ class FFmpegService:
             "+faststart",
             str(output_path),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        self._run(cmd)
         return output_path
 
     def mux_audio(self, video_path: Path, audio_path: Path, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
+
         def command(video_args: list[str]) -> list[str]:
             return [
                 "ffmpeg",
@@ -156,15 +182,10 @@ class FFmpegService:
         try:
             # Preserve the source video bit-for-bit whenever its codec can be
             # carried by the MP4 output container.
-            subprocess.run(
-                command(["-c:v", "copy"]),
-                check=True,
-                capture_output=True,
-                text=True,
-            )
+            self._run(command(["-c:v", "copy"]))
         except subprocess.CalledProcessError:
             # Use a visually lossless fallback only for incompatible codecs.
-            subprocess.run(
+            self._run(
                 command(
                     [
                         "-c:v",
@@ -176,9 +197,6 @@ class FFmpegService:
                         "-pix_fmt",
                         "yuv420p",
                     ]
-                ),
-                check=True,
-                capture_output=True,
-                text=True,
+                )
             )
         return output_path

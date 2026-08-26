@@ -13,9 +13,7 @@ def duration_matched_speed(
         return base_speed
     if natural_duration_seconds >= target_duration_seconds * (1 - tolerance):
         return base_speed
-    estimated_speed = base_speed * (
-        natural_duration_seconds / target_duration_seconds
-    )
+    estimated_speed = base_speed * (natural_duration_seconds / target_duration_seconds)
     return round(max(min_speed, min(base_speed, estimated_speed)), 4)
 
 

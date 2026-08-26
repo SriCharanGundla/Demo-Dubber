@@ -10,19 +10,24 @@ def apply_char_limits(
     chars_per_second: float | None = None,
     guard_gap_ms: int = 0,
 ) -> Transcript:
-    final_limit = expanded_final_char_limit(
-        transcript.cues,
-        media_duration_seconds,
-        chars_per_second,
-        margin,
-        guard_gap_ms,
-    )
     updated = []
     for index, cue in enumerate(transcript.cues):
-        original_text = cue.original_text or cue.text
-        char_limit = max(1, len(original_text) + margin)
-        if final_limit is not None and index == len(transcript.cues) - 1:
-            char_limit = max(char_limit, final_limit)
+        next_cue = (
+            transcript.cues[index + 1] if index + 1 < len(transcript.cues) else None
+        )
+        slot_end = (
+            next_cue.start_seconds
+            if next_cue is not None
+            else media_duration_seconds or cue.end_seconds
+        )
+        if chars_per_second is None:
+            original_text = cue.original_text or cue.text
+            char_limit = max(1, len(original_text) + margin)
+        else:
+            usable_seconds = max(
+                0.0, slot_end - cue.start_seconds - guard_gap_ms / 1000
+            )
+            char_limit = max(1, int(usable_seconds * chars_per_second) + margin)
         updated.append(
             cue.model_copy(
                 update={

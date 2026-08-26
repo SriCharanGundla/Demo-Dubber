@@ -95,7 +95,7 @@ export function TranscribeScreen() {
       return;
     }
     sampleAudio.current?.pause();
-    const audio = new Audio(voice.sample_url);
+    const audio = new Audio(api.mediaUrl(voice.sample_url));
     sampleAudio.current = audio;
     setPlayingVoice(voice.id);
     audio.addEventListener("ended", () => setPlayingVoice(null), { once: true });
@@ -191,7 +191,11 @@ export function TranscribeScreen() {
               disabled={jobActive || busy}
             />
           </label>
-          <ScrollArea className="mt-4 h-96 rounded-xl border border-border">
+          <ScrollArea
+            className="mt-4 h-96 rounded-xl border border-border"
+            role="radiogroup"
+            aria-label="Narration voices"
+          >
             <div className="grid gap-2 p-3 sm:grid-cols-2">
               {filteredVoices.map((voice) => {
                 const selected = voice.id === ttsVoice;
@@ -213,8 +217,33 @@ export function TranscribeScreen() {
                       ) {
                         event.preventDefault();
                         setTtsVoice(voice.id);
+                      } else if (
+                        !jobActive &&
+                        !busy &&
+                        ["ArrowDown", "ArrowRight", "ArrowUp", "ArrowLeft"].includes(
+                          event.key,
+                        )
+                      ) {
+                        event.preventDefault();
+                        const direction = ["ArrowDown", "ArrowRight"].includes(
+                          event.key,
+                        )
+                          ? 1
+                          : -1;
+                        const currentIndex = filteredVoices.findIndex(
+                          (item) => item.id === voice.id,
+                        );
+                        const nextIndex =
+                          (currentIndex + direction + filteredVoices.length) %
+                          filteredVoices.length;
+                        const nextVoice = filteredVoices[nextIndex];
+                        setTtsVoice(nextVoice.id);
+                        document
+                          .querySelector(`[data-voice-id="${nextVoice.id}"]`)
+                          ?.focus();
                       }
                     }}
+                    data-voice-id={voice.id}
                     className={`flex cursor-pointer items-center gap-3 rounded-xl border p-2.5 transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring ${
                       selected
                         ? "border-primary bg-primary/5"

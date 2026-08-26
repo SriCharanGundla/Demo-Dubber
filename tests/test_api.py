@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from apps.api import main as api_module
 from apps.api.jobs import InMemoryJobStore
-from demo_dubber.models import Cue, RenderArtifacts
+from demo_dubber.models import Cue, MediaAsset, RenderArtifacts
 from demo_dubber.services.project_store import save_project_state
 
 
@@ -40,10 +40,20 @@ class ApiTests(unittest.TestCase):
         self.temporary_directory.cleanup()
 
     def _upload_project(self) -> dict[str, object]:
-        response = self.client.post(
-            "/api/projects",
-            files={"video": ("demo.mp4", b"test video", "video/mp4")},
-        )
+        with patch.object(
+            api_module.FFmpegService,
+            "probe_video",
+            return_value=MediaAsset(
+                source_video=Path("demo.mp4"),
+                duration_seconds=60,
+                width=1920,
+                height=1080,
+            ),
+        ):
+            response = self.client.post(
+                "/api/projects",
+                files={"video": ("demo.mp4", b"test video", "video/mp4")},
+            )
         self.assertEqual(response.status_code, 201)
         return response.json()
 
@@ -89,7 +99,10 @@ class ApiTests(unittest.TestCase):
 
     def test_project_upload_list_and_delete(self) -> None:
         project = self._upload_project()
-        self.assertTrue(Path(project["source_video"]).is_file())
+        self.assertNotIn("source_video", project)
+        self.assertNotIn("output_dir", project)
+        stored = api_module._project(str(project["project_id"]))
+        self.assertTrue(stored.source_video and stored.source_video.is_file())
         self.assertEqual(project["tts_voice"], "af_heart")
         self.assertEqual(project["tts_language"], "a")
 
@@ -123,9 +136,7 @@ class ApiTests(unittest.TestCase):
         project = self._upload_project()
         job = api_module.jobs.create(str(project["project_id"]), "transcription")
 
-        response = self.client.get(
-            f"/api/projects/{project['project_id']}/jobs/active"
-        )
+        response = self.client.get(f"/api/projects/{project['project_id']}/jobs/active")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["job"]["id"], job.id)
@@ -145,9 +156,7 @@ class ApiTests(unittest.TestCase):
             error="Cleanup provider timed out",
         )
 
-        response = self.client.get(
-            f"/api/projects/{project['project_id']}/jobs/latest"
-        )
+        response = self.client.get(f"/api/projects/{project['project_id']}/jobs/latest")
 
         self.assertEqual(response.status_code, 200)
         latest = response.json()["job"]
@@ -212,3 +221,86 @@ class ApiTests(unittest.TestCase):
             files={"video": ("payload.exe", b"unsafe", "application/octet-stream")},
         )
         self.assertEqual(response.status_code, 415)
+
+    def test_upload_rejects_files_over_configured_limit(self) -> None:
+        api_module.settings = api_module.settings.model_copy(
+            update={"max_upload_bytes": 3}
+        )
+        response = self.client.post(
+            "/api/projects",
+            files={"video": ("large.mp4", b"four", "video/mp4")},
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(
+            [
+                path.name
+                for path in Path(self.temporary_directory.name).iterdir()
+                if path.name != "voice-samples"
+            ],
+            [],
+        )
+
+    def test_transcript_update_rejects_untrusted_cue_metadata(self) -> None:
+        project_payload = self._upload_project()
+        project = api_module._project(str(project_payload["project_id"]))
+        original = Cue(
+            index=0,
+            start_seconds=1,
+            end_seconds=3,
+            text="Original words",
+            original_text="Original words",
+            char_limit=1,
+            over_limit=True,
+        )
+        save_project_state(
+            project.model_copy(update={"transcript_cues": [original.model_dump()]})
+        )
+
+        response = self.client.put(
+            f"/api/projects/{project.project_id}/transcript",
+            json={
+                "cues": [
+                    {
+                        **original.model_dump(),
+                        "text": "Edited words",
+                        "start_seconds": 20,
+                        "end_seconds": 30,
+                        "original_text": "Tampered",
+                        "char_limit": 9999,
+                        "over_limit": False,
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(response.status_code, 422)
+
+        accepted = self.client.put(
+            f"/api/projects/{project.project_id}/transcript",
+            json={"cues": [{"index": 0, "text": "Edited words"}]},
+        )
+        self.assertEqual(accepted.status_code, 200)
+        saved = accepted.json()["cues"][0]
+        self.assertEqual(saved["start_seconds"], 1)
+        self.assertEqual(saved["end_seconds"], 3)
+        self.assertEqual(saved["original_text"], "Original words")
+        self.assertNotEqual(saved["char_limit"], 9999)
+
+    def test_render_rejects_over_limit_transcript(self) -> None:
+        project_payload = self._upload_project()
+        project = api_module._project(str(project_payload["project_id"]))
+        cue = Cue(
+            index=0,
+            start_seconds=0,
+            end_seconds=1,
+            text="x" * 1_000,
+            original_text="Short",
+        )
+        save_project_state(
+            project.model_copy(update={"transcript_cues": [cue.model_dump()]})
+        )
+
+        response = self.client.post(f"/api/projects/{project.project_id}/render")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("over-limit", response.json()["detail"])

@@ -12,7 +12,7 @@ export function JobProgress({ job }) {
       ? 100
       : 5;
   return (
-    <Card>
+    <Card aria-live="polite" aria-atomic="true">
       <div className="mb-3 flex items-center justify-between gap-3">
         <span className="flex items-center gap-2 font-semibold">
           {["queued", "running"].includes(job.status) && (

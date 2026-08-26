@@ -110,7 +110,7 @@ if docker ps -a --format '{{.Names}}' | grep -Fx "$CONTAINER_NAME" >/dev/null 2>
   docker rm -f "$CONTAINER_NAME" >/dev/null
 fi
 
-echo "Starting $CONTAINER_NAME on 0.0.0.0:$HOST_PORT"
+echo "Starting $CONTAINER_NAME on 127.0.0.1:$HOST_PORT"
 docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \
@@ -120,13 +120,13 @@ docker run -d \
   -e DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8 \
   -e DEMO_DUBBER_OUTPUTS=/app/outputs \
   -e DEMO_DUBBER_WORKSPACE=/app/workspace \
-  -p "0.0.0.0:${HOST_PORT}:${CONTAINER_PORT}" \
+  -p "127.0.0.1:${HOST_PORT}:${CONTAINER_PORT}" \
   -v "$HOST_OUTPUTS_DIR:/app/outputs" \
   -v "$HOST_WORKSPACE_DIR:/app/workspace" \
   "$IMAGE_NAME"
 
 echo "Container: $CONTAINER_NAME"
-echo "URL: http://0.0.0.0:${HOST_PORT}"
+echo "URL: http://127.0.0.1:${HOST_PORT}"
 echo "Outputs volume: $HOST_OUTPUTS_DIR"
 echo "Workspace volume: $HOST_WORKSPACE_DIR"
 echo "Whisper and Kokoro models: baked into image $IMAGE_NAME"

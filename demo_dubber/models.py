@@ -10,12 +10,14 @@ class MediaAsset(BaseModel):
     extracted_audio: Path | None = None
     compressed_audio: Path | None = None
     duration_seconds: float | None = None
+    width: int | None = None
+    height: int | None = None
 
 
 class Cue(BaseModel):
-    index: int
-    start_seconds: float
-    end_seconds: float
+    index: int = Field(ge=0)
+    start_seconds: float = Field(ge=0, allow_inf_nan=False)
+    end_seconds: float = Field(gt=0, allow_inf_nan=False)
     text: str
     original_text: str
     speaker: str | None = None
