@@ -35,9 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Docker images do not inherit the host's trusted corporate/proxy CAs.  The
-# deploy script supplies its effective CA bundle as a BuildKit secret so HTTPS
-# clients used both during the build and at runtime retain certificate checks.
 RUN --mount=type=secret,id=ca_bundle,required=false \
     if [ -f /run/secrets/ca_bundle ]; then \
       cp /run/secrets/ca_bundle /etc/ssl/certs/ca-certificates.crt; \
@@ -67,9 +64,6 @@ RUN --mount=type=secret,id=hf_token \
       echo "Skipping Kokoro prewarm during build"; \
     fi
 
-# Keep application changes from invalidating the large, network-dependent
-# dependency and model layers above. Only this inexpensive layer should rebuild
-# for normal source or configuration-example edits.
 COPY . .
 
 EXPOSE 6767

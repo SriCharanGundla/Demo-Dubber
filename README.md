@@ -1,190 +1,159 @@
 # Demo Dubber
 
-Streamlit app for turning narrated demo videos into cleaned, re-voiced MP4s.
+Demo Dubber turns a narrated demo video into an editable, timestamp-safe transcript and a Kokoro-voiced MP4. The current branch is a pnpm/uv monorepo with a React web client and FastAPI backend. The original Streamlit app remains available and is tagged as `streamlit-v1`.
 
-It does four things:
-- extracts audio from an uploaded demo video with `ffmpeg`
-- transcribes the narration with an OpenAI speech-to-text model using timestamps
-- cleans and merges awkward transcript chunks with the configured cleanup model
-- generates replacement narration locally with Kokoro and muxes it back into the video
+## Architecture
 
-## Workflow
+```text
+apps/
+  api/          FastAPI HTTP API and local background-job adapter
+  web/          Vite + React JavaScript + Tailwind CSS v4 + shadcn-style UI
+  streamlit/    compatibility entry point for the original interface
+demo_dubber/    shared models, media, transcription, cleanup, and render services
+tests/          workflow, safety, provider, and API contract tests
+```
 
-The app uses a staged flow:
+The backend exposes project, transcription, transcript editing, rendering, job polling, provider, health, and contained artifact-download endpoints. Interactive API documentation is at `http://localhost:8000/docs`.
 
-1. Upload a demo video and preview it in the UI.
-2. Extract audio and transcribe it with timestamped OpenAI segments.
-3. Run a cleanup pass with the configured model to fix grammar, remove stutters, and merge adjacent split sentence fragments while preserving timestamp coverage.
-4. Show timestamped transcript rows with:
-   - original text on the left
-   - editable text on the right
-   - an optional per-cue source preview in audio or video mode
-   - unrestricted editable text with a non-blocking timing estimate
-   - natural and quality-capped local TTS previews for each cue
-   - autosaved progress so draft edits survive refreshes and crashes
-5. Generate Kokoro TTS per cue.
-6. Plan the narration globally by keeping natural speech where possible, borrowing nearby silence within a bounded timestamp shift, selectively accelerating conflicting cues, and using tightly capped `ffmpeg atempo` only as a last resort.
-7. Reject impossible timelines with an actionable cue message instead of silently producing heavily compressed or clipped speech.
-8. Assemble a narration WAV timeline.
-9. Mux the narration back into the original video.
-10. Preview the dubbed MP4 and download:
-   - MP4
-   - SRT
-   - TXT
-   - narration WAV
-11. Reopen saved uploads from the history list on the upload screen.
+The React app uses a resumable four-stage flow:
+
+1. `/projects` — upload, rename, delete, and resume projects.
+2. `/projects/:id/transcribe` — choose providers and monitor transcription phases.
+3. `/projects/:id/transcript` — edit cues, compare original media with fitted TTS, and download SRT/TXT.
+4. `/projects/:id/export` — render, preview, and download the dubbed video and supporting files.
+
+Renaming changes only the displayed title. The project ID and URLs stay stable.
 
 ## Requirements
 
-- Python `3.12+`
-- `uv`
-- `ffmpeg`
-- `ffprobe`
+- Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22+, and pnpm 11+
+- `ffmpeg` and `ffprobe`
+- An OpenAI key for hosted transcription, or local faster-whisper
+- A key for the selected transcript-cleanup provider
 
-## Environment
-
-Copy the template and fill in the API key:
+## Setup and run
 
 ```bash
 cp .env.example .env
+uv sync --all-groups
+pnpm install
+pnpm dev
 ```
 
-Current environment variables:
+Open `http://localhost:5173`. Vite proxies `/api` to FastAPI on port 8000.
+
+```bash
+pnpm lint       # Ruff + ESLint, with zero warnings allowed
+pnpm test       # Python unit and API contract tests
+pnpm build      # Vite production build
+pnpm dev:api    # FastAPI only
+pnpm dev:web    # React only
+```
+
+The Streamlit fallback remains available:
+
+```bash
+uv run streamlit run app.py
+# or: uv run streamlit run apps/streamlit/app.py
+```
+
+### Local transcription devices
+
+Both UIs detect the transcription backends available on the current machine.
+The environment setting controls the default selection:
+
+```env
+# auto | cpu | cuda | mps
+DEMO_DUBBER_TRANSCRIPTION_PROVIDER=local
+DEMO_DUBBER_LOCAL_WHISPER_DEVICE=auto
+
+# faster-whisper settings for auto, cpu, and cuda
+DEMO_DUBBER_LOCAL_WHISPER_MODEL=medium.en
+DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8
+DEMO_DUBBER_LOCAL_WHISPER_AUTO_COMPUTE_TYPE=auto
+
+# MLX model used when device=mps on Apple Silicon
+DEMO_DUBBER_MLX_WHISPER_MODEL=mlx-community/whisper-medium.en-mlx
+```
+
+- `cpu` uses faster-whisper with CTranslate2.
+- `cuda` uses faster-whisper on a detected NVIDIA GPU.
+- `mps` or `metal` routes to MLX Whisper on Apple Silicon.
+- `auto` lets CTranslate2 choose its faster-whisper device. Set `mps` when MLX
+  should be the default on a Mac.
+
+## Cleanup providers
+
+All cleanup responses are validated locally to preserve cue order, adjacent coverage, speaker boundaries, and trusted timestamps.
+
+- `openai`: OpenAI Responses API with strict JSON Schema.
+- `gemini`: Gemini AI Studio's OpenAI-compatible Chat Completions endpoint.
+- `openrouter`: OpenRouter's OpenAI-compatible endpoint. The adapter requests providers that support structured parameters, then safely falls back to prompt-constrained JSON if the selected model rejects JSON Schema.
+
+Gemini and OpenRouter compatibility is covered by mocked request/validation contract tests. Live calls require your own keys and incur provider usage; select the configured provider in either UI to perform an end-to-end check.
+
+Key environment variables:
 
 ```env
 OPENAI_API_KEY=
-KOKORO_VOICE=af_heart
-KOKORO_SPEED=1.0
-DEMO_DUBBER_MAX_KOKORO_SPEED=1.25
-KOKORO_LANG_CODE=a
-KOKORO_REPO_ID=hexgrad/Kokoro-82M
-DEMO_DUBBER_WORKSPACE=workspace
-DEMO_DUBBER_OUTPUTS=outputs
-DEMO_DUBBER_GUARD_GAP_MS=120
-DEMO_DUBBER_CHARS_PER_SECOND=14.0
-DEMO_DUBBER_CHAR_LIMIT_MARGIN=10
-DEMO_DUBBER_MAX_TEMPO_COMPRESSION_RATIO=1.08
-DEMO_DUBBER_MAX_CUE_SHIFT_SECONDS=0.75
-DEMO_DUBBER_TRANSCRIPTION_MODEL=whisper-1
 DEMO_DUBBER_TRANSCRIPTION_PROVIDER=openai
-DEMO_DUBBER_LOCAL_WHISPER_MODEL=medium.en
-DEMO_DUBBER_LOCAL_WHISPER_DEVICE=cpu
-DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8
-DEMO_DUBBER_LOCAL_WHISPER_BEAM_SIZE=5
-DEMO_DUBBER_TRANSCRIPTION_CHUNK_SECONDS=600
-DEMO_DUBBER_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS=1.0
 DEMO_DUBBER_CLEANUP_PROVIDER=openai
-DEMO_DUBBER_CLEANUP_MODEL=gpt-5.6-luna
+
+GEMINI_API_KEY=
+GEMINI_OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
+GEMINI_MODEL=gemini-3.7-flash
+
+OPENROUTER_API_KEY=
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_MODEL=google/gemini-3.7-flash
+OPENROUTER_SITE_URL=
+OPENROUTER_APP_NAME=Demo Dubber
+
 ```
 
-Notes:
-- `OPENAI_API_KEY` is required for transcription and transcript cleanup.
-- `DEMO_DUBBER_TRANSCRIPTION_MODEL` sets the default upload-screen transcription mode. You can still switch between `Standard` and `Speaker-aware` per run in the UI.
-- `DEMO_DUBBER_TRANSCRIPTION_PROVIDER=local` defaults the upload screen to local `faster-whisper`; the UI still lets you switch back to OpenAI per run.
-- Local transcription uses `DEMO_DUBBER_LOCAL_WHISPER_MODEL`, `DEMO_DUBBER_LOCAL_WHISPER_DEVICE`, `DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE`, and `DEMO_DUBBER_LOCAL_WHISPER_BEAM_SIZE`. The default is `medium.en` on CPU with int8 quantization.
-- Recordings longer than `DEMO_DUBBER_TRANSCRIPTION_CHUNK_SECONDS` are transcribed in overlapping chunks. `DEMO_DUBBER_TRANSCRIPTION_CHUNK_OVERLAP_SECONDS` controls boundary context while midpoint ownership removes duplicate cues.
-- `DEMO_DUBBER_CLEANUP_PROVIDER=openai` uses OpenAI Responses for transcript cleanup.
-- Docker deploy mounts `.docker-data/huggingface` to `/opt/huggingface`, so local Whisper models download on first use and are reused across container rebuilds. Override with `HOST_HF_CACHE_DIR=/path/to/cache ./deploy.sh`.
-- `DEMO_DUBBER_CHAR_LIMIT_MARGIN` only controls the timing estimate shown beside editable text; it is not a hard input limit.
-- `DEMO_DUBBER_MAX_KOKORO_SPEED` caps generated speech acceleration so fitting cannot silently produce extreme delivery.
-- `DEMO_DUBBER_MAX_TEMPO_COMPRESSION_RATIO` caps the last-resort `ffmpeg atempo` adjustment.
-- `DEMO_DUBBER_MAX_CUE_SHIFT_SECONDS` controls how far the global scheduler may move narration around its original timestamp to borrow nearby silence.
-- `KOKORO_REPO_ID` is set explicitly to suppress Kokoro’s default repo warning.
+See [.env.example](./.env.example) for transcription, timing, Kokoro, workspace, and CORS settings.
 
-## Local Run
+## Processing behavior
 
-Install dependencies:
+1. The source video is saved under a contained per-project output directory.
+2. FFmpeg extracts mono audio; long recordings are transcribed in overlapping chunks.
+3. Cleanup may correct wording and merge adjacent cues, but cannot alter timeline coverage.
+4. Cue edits retain character budgets derived from timing.
+5. The selected American or British Kokoro voice is retained per project; narration duration-matches short cues within a quality floor, then schedules all cues globally with bounded silence, speed, and tempo adjustments.
+6. The app exports TXT, SRT, narration WAV, and a muxed MP4 that stream-copies compatible source video or uses a high-quality fallback.
 
-```bash
-uv sync --project . --native-tls
-```
+Project state and artifacts live under `outputs/`. Temporary workspace data lives under `workspace/`. Both can be relocated with environment variables.
 
-Run the app:
+## Docker deployments
 
-```bash
-uv run --project . python -m streamlit run app.py
-```
-
-The included Streamlit config runs headless by default. Open the app in your browser at:
-
-```text
-http://localhost:8501
-```
-
-## Deployment
-
-This folder includes a Docker-based deployment path.
-
-Files:
-- [Dockerfile](./Dockerfile)
-- [deploy.sh](./deploy.sh)
-- [teardown.sh](./teardown.sh)
-
-The container:
-- binds Streamlit to `0.0.0.0`
-- exposes port `6767`
-- installs `ffmpeg`
-- installs the spaCy English model needed by Kokoro’s English pipeline
-
-Deploy:
+The supported deployment is the FastAPI + compiled React image:
 
 ```bash
 ./deploy.sh
+# open http://localhost:8000
 ```
 
-Tear down:
+The build downloads the configured faster-whisper model, Kokoro model, and all
+28 Kokoro English voice packs into the image. It also renders each voice's
+picker sample once at build time. Docker reuses those immutable model and audio
+layers on later builds, so playing a sample never invokes TTS at runtime.
+Project outputs and workspace data remain in the repo's existing `outputs/`
+and `workspace/` directories; the baked model cache is intentionally not hidden
+by a runtime volume.
 
-```bash
-./teardown.sh
-```
+Docker Desktop and OrbStack run Linux containers, so macOS Metal and MLX Whisper
+are unavailable inside Docker—even on Apple Silicon. The deployment forces
+CPU `faster-whisper` with `int8`. `Dockerfile.streamlit` remains available for
+manual compatibility builds, but `deploy.sh` runs only the React web app.
 
-Defaults:
-- image name: `demo-dubber`
-- container name: `demo-dubber`
-- host port: `6767`
-- data root for persisted uploads/history: `.docker-data/`
-- Kokoro model prewarm during image build: enabled by default
+## Deployment notes
 
-Optional overrides:
+Rendering and transcription continue when the browser tab is closed, as long as
+the Docker container remains running. Reopening a project reconnects the UI to
+an active job, and completed artifacts remain resumable from disk.
 
-```bash
-IMAGE_NAME=my-demo-dubber CONTAINER_NAME=my-demo-dubber HOST_PORT=6767 ./deploy.sh
-ENV_FILE=/absolute/path/to/.env ./deploy.sh
-DATA_ROOT=/absolute/path/to/demo-dubber-data ./deploy.sh
-PREWARM_KOKORO=1 ./deploy.sh
-PREWARM_KOKORO=0 ./deploy.sh
-CA_BUNDLE=/path/to/company-ca-bundle.pem ./deploy.sh
-```
-
-`PREWARM_KOKORO=1` downloads the Kokoro model and configured voice during image build so runtime rendering does not need to fetch them again. `deploy.sh` passes `KOKORO_VOICE`, `KOKORO_LANG_CODE`, and `KOKORO_REPO_ID` from `.env` as build args so the prewarmed assets match runtime settings. It also passes `HF_TOKEN` from `.env` to Docker as a BuildKit secret for this download without baking the token into the image. If Docker Hub, PyTorch, GitHub, or Hugging Face reset a connection, the build retries before failing.
-
-The deploy script also imports the host CA bundle (default:
-`/etc/ssl/certs/ca-certificates.crt`) into the image. Set `CA_BUNDLE` when the
-trusted corporate/proxy CA bundle lives elsewhere. The bundle is passed through
-BuildKit rather than copied into the Docker build context.
-
-## Outputs
-
-Generated files go into:
-
-- `workspace/`
-  temporary uploaded and extracted source media
-- `outputs/`
-  per-video project folders containing saved editor state, transcript exports, segment WAVs, and final dubbed MP4
-
-## Current Behavior
-
-- transcript editing is cue-based, not word-based
-- cue timestamps are derived from the original ASR cue coverage after transcript cleanup
-- the app blocks rendering if a cue still cannot fit safely into its slot
-- transcript cleanup is validated so cue coverage and ordering cannot drift away from the original ASR timestamps
-- speaker labels are optional and only appear when speaker recognition is enabled for that upload
-
-## Known Constraints
-
-- transcript cleanup uses strict JSON Schema where supported, retries one invalid response, and still validates cue coverage locally
-- very long videos require enough temporary disk space for the extracted WAV and chunk files
-- `gpt-4o-transcribe` and `gpt-4o-mini-transcribe` are not wired into this app because they do not provide the timestamped segment output this workflow depends on
-- `ffmpeg atempo` fallback is intentionally conservative and will not heavily compress speech just to force a fit
-- the renderer retries a few faster Kokoro speeds before using the tempo fallback
-- uploaded and rendered videos are stored on disk inside this app directory unless you change the env paths
+The in-process API job store is intentionally a local single-process adapter.
+Restarting the container interrupts an active job, though completed project data
+and render checkpoints remain on disk. Before scaling the API to multiple
+workers or machines, replace it with a durable queue and persist job status
+externally; the frontend polling contract can stay unchanged.

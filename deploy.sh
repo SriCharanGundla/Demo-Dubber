@@ -2,17 +2,16 @@
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-IMAGE_NAME=${IMAGE_NAME:-demo-dubber}
+IMAGE_NAME=${IMAGE_NAME:-demo-dubber-web}
 CONTAINER_NAME=${CONTAINER_NAME:-demo-dubber}
-HOST_PORT=${HOST_PORT:-6767}
-CONTAINER_PORT=6767
+HOST_PORT=${HOST_PORT:-8000}
+CONTAINER_PORT=8000
 ENV_FILE=${ENV_FILE:-"$SCRIPT_DIR/.env"}
 PREWARM_KOKORO=${PREWARM_KOKORO:-1}
+PREWARM_WHISPER=${PREWARM_WHISPER:-1}
 BUILD_RETRIES=${BUILD_RETRIES:-3}
-DATA_ROOT=${DATA_ROOT:-"$SCRIPT_DIR/.docker-data"}
-HOST_OUTPUTS_DIR=${HOST_OUTPUTS_DIR:-"$DATA_ROOT/outputs"}
-HOST_WORKSPACE_DIR=${HOST_WORKSPACE_DIR:-"$DATA_ROOT/workspace"}
-HOST_HF_CACHE_DIR=${HOST_HF_CACHE_DIR:-"$DATA_ROOT/huggingface"}
+HOST_OUTPUTS_DIR=${HOST_OUTPUTS_DIR:-"$SCRIPT_DIR/outputs"}
+HOST_WORKSPACE_DIR=${HOST_WORKSPACE_DIR:-"$SCRIPT_DIR/workspace"}
 CA_BUNDLE=${CA_BUNDLE:-${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}}
 
 env_value() {
@@ -43,12 +42,13 @@ if [ ! -f "$ENV_FILE" ]; then
   exit 1
 fi
 
-mkdir -p "$HOST_OUTPUTS_DIR" "$HOST_WORKSPACE_DIR" "$HOST_HF_CACHE_DIR"
+mkdir -p "$HOST_OUTPUTS_DIR" "$HOST_WORKSPACE_DIR"
 
 HF_TOKEN_VALUE=${HF_TOKEN:-$(env_value HF_TOKEN "")}
 KOKORO_VOICE_VALUE=${KOKORO_VOICE:-$(env_value KOKORO_VOICE af_heart)}
 KOKORO_LANG_CODE_VALUE=${KOKORO_LANG_CODE:-$(env_value KOKORO_LANG_CODE a)}
 KOKORO_REPO_ID_VALUE=${KOKORO_REPO_ID:-$(env_value KOKORO_REPO_ID hexgrad/Kokoro-82M)}
+WHISPER_MODEL_VALUE=${DEMO_DUBBER_LOCAL_WHISPER_MODEL:-$(env_value DEMO_DUBBER_LOCAL_WHISPER_MODEL medium.en)}
 
 HF_TOKEN_SECRET_FILE=""
 if [ -n "$HF_TOKEN_VALUE" ]; then
@@ -76,10 +76,13 @@ docker_build() {
 
   docker build \
     "$@" \
+    -f "$SCRIPT_DIR/Dockerfile.web" \
     --build-arg "PREWARM_KOKORO=$PREWARM_KOKORO" \
+    --build-arg "PREWARM_WHISPER=$PREWARM_WHISPER" \
     --build-arg "KOKORO_VOICE=$KOKORO_VOICE_VALUE" \
     --build-arg "KOKORO_LANG_CODE=$KOKORO_LANG_CODE_VALUE" \
     --build-arg "KOKORO_REPO_ID=$KOKORO_REPO_ID_VALUE" \
+    --build-arg "WHISPER_MODEL=$WHISPER_MODEL_VALUE" \
     -t "$IMAGE_NAME" \
     "$SCRIPT_DIR"
 }
@@ -112,14 +115,18 @@ docker run -d \
   --name "$CONTAINER_NAME" \
   --restart unless-stopped \
   --env-file "$ENV_FILE" \
+  -e HF_HOME=/opt/huggingface \
+  -e DEMO_DUBBER_LOCAL_WHISPER_DEVICE=cpu \
+  -e DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8 \
+  -e DEMO_DUBBER_OUTPUTS=/app/outputs \
+  -e DEMO_DUBBER_WORKSPACE=/app/workspace \
   -p "0.0.0.0:${HOST_PORT}:${CONTAINER_PORT}" \
   -v "$HOST_OUTPUTS_DIR:/app/outputs" \
   -v "$HOST_WORKSPACE_DIR:/app/workspace" \
-  -v "$HOST_HF_CACHE_DIR:/opt/huggingface" \
   "$IMAGE_NAME"
 
 echo "Container: $CONTAINER_NAME"
 echo "URL: http://0.0.0.0:${HOST_PORT}"
 echo "Outputs volume: $HOST_OUTPUTS_DIR"
 echo "Workspace volume: $HOST_WORKSPACE_DIR"
-echo "Hugging Face cache volume: $HOST_HF_CACHE_DIR"
+echo "Whisper and Kokoro models: baked into image $IMAGE_NAME"

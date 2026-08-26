@@ -2,7 +2,11 @@ import unittest
 from pathlib import Path
 
 from demo_dubber.models import Cue, SynthesisResult
-from demo_dubber.services.cue_fit import next_quality_adjustment, quality_speed_steps
+from demo_dubber.services.cue_fit import (
+    duration_matched_speed,
+    next_quality_adjustment,
+    quality_speed_steps,
+)
 from demo_dubber.services.timeline import plan_quality_constrained_placements
 
 
@@ -27,6 +31,15 @@ def result(index: int, duration: float) -> SynthesisResult:
 
 
 class QualityTimingTests(unittest.TestCase):
+    def test_short_speech_is_slowed_to_match_original_cue_duration(self) -> None:
+        self.assertEqual(duration_matched_speed(1.0, 0.8, 3.2, 4.0), 0.8)
+
+    def test_duration_matching_respects_quality_floor(self) -> None:
+        self.assertEqual(duration_matched_speed(1.0, 0.8, 1.0, 4.0), 0.8)
+
+    def test_nearly_matching_speech_keeps_natural_speed(self) -> None:
+        self.assertEqual(duration_matched_speed(1.0, 0.8, 3.9, 4.0), 1.0)
+
     def test_speed_steps_never_exceed_quality_cap(self) -> None:
         self.assertEqual(quality_speed_steps(1.0, 1.12), [1.0, 1.05, 1.1, 1.12])
 

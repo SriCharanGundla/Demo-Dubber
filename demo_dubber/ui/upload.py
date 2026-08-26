@@ -7,12 +7,8 @@ import streamlit as st
 from openai import OpenAIError
 
 from demo_dubber.config import Settings
-from demo_dubber.models import Cue, Transcript
+from demo_dubber.models import Cue
 from demo_dubber.services.ffmpeg import FFmpegService
-from demo_dubber.services.local_whisper_transcribe import (
-    LocalWhisperTranscriptionService,
-)
-from demo_dubber.services.openai_cleanup import OpenAICleanupService
 from demo_dubber.services.openai_transcribe import (
     DIARIZATION_MODEL,
     OpenAITranscriptionService,
@@ -25,11 +21,23 @@ from demo_dubber.services.project_store import (
     save_session_project,
     scan_saved_projects,
 )
+from demo_dubber.services.provider_factory import (
+    build_cleanup_service,
+    cleanup_provider_catalog,
+)
 from demo_dubber.services.transcript_import import (
     apply_replacement_texts,
     replacement_texts_from_txt,
     transcript_from_srt,
     transcript_from_timestamped_txt,
+)
+from demo_dubber.services.transcript_limits import (
+    apply_char_limits,
+    expanded_final_char_limit,
+)
+from demo_dubber.services.transcription_factory import (
+    build_transcription_service,
+    transcription_provider_catalog,
 )
 from demo_dubber.services.transcription_workflow import TranscriptionWorkflow
 from demo_dubber.utils.files import (
@@ -45,9 +53,9 @@ TRANSCRIPTION_PROVIDER_KEY = "transcription_provider"
 CLEANUP_PROVIDER_KEY = "cleanup_provider"
 STANDARD_TRANSCRIPTION_MODE = "Standard"
 SPEAKER_AWARE_TRANSCRIPTION_MODE = "Speaker-aware"
-OPENAI_TRANSCRIPTION_PROVIDER = "OpenAI Whisper"
-LOCAL_TRANSCRIPTION_PROVIDER = "Local Whisper"
 OPENAI_CLEANUP_PROVIDER = "OpenAI"
+GEMINI_CLEANUP_PROVIDER = "Gemini AI Studio"
+OPENROUTER_CLEANUP_PROVIDER = "OpenRouter"
 
 
 def render_upload_panel(settings: Settings) -> None:
@@ -89,32 +97,72 @@ def _show_next_steps(settings: Settings, video_path: Path) -> None:
             "to label multiple speakers for this upload."
         ),
     )
+    transcription_infos = transcription_provider_catalog(settings)
+    available_transcription = [
+        provider for provider in transcription_infos if provider.configured
+    ]
+    transcription_options = [
+        provider.label for provider in available_transcription
+    ] or ["No transcription provider available"]
+    if st.session_state.get(TRANSCRIPTION_PROVIDER_KEY) not in transcription_options:
+        st.session_state[TRANSCRIPTION_PROVIDER_KEY] = transcription_options[0]
     transcription_provider = st.radio(
         "Transcription provider",
-        options=[OPENAI_TRANSCRIPTION_PROVIDER, LOCAL_TRANSCRIPTION_PROVIDER],
+        options=transcription_options,
         key=TRANSCRIPTION_PROVIDER_KEY,
         horizontal=True,
-        disabled=transcription_mode == SPEAKER_AWARE_TRANSCRIPTION_MODE,
-        help="Local Whisper runs faster-whisper on this machine. Speaker-aware transcription currently requires OpenAI.",
+        disabled=(
+            transcription_mode == SPEAKER_AWARE_TRANSCRIPTION_MODE
+            or not available_transcription
+        ),
+        help=(
+            "CPU, CUDA, and Apple Silicon availability is detected at runtime. "
+            "Speaker-aware transcription currently requires OpenAI."
+        ),
     )
     if transcription_mode == SPEAKER_AWARE_TRANSCRIPTION_MODE:
         st.caption("Using `gpt-4o-transcribe-diarize` for this run.")
-    elif transcription_provider == LOCAL_TRANSCRIPTION_PROVIDER:
-        st.caption(
-            f"Using local `faster-whisper` model `{settings.local_whisper_model}` "
-            f"on `{settings.local_whisper_device}` with `{settings.local_whisper_compute_type}`."
-        )
     else:
-        st.caption("Using `whisper-1` for this run.")
-    st.radio(
+        selected_info = next(
+            (
+                provider
+                for provider in transcription_infos
+                if provider.label == transcription_provider
+            ),
+            None,
+        )
+        st.caption(selected_info.detail if selected_info else "Unavailable")
+    cleanup_infos = cleanup_provider_catalog(settings)
+    available_cleanup = [provider for provider in cleanup_infos if provider.configured]
+    cleanup_options = [provider.label for provider in available_cleanup] or [
+        "No cleanup provider configured"
+    ]
+    if st.session_state.get(CLEANUP_PROVIDER_KEY) not in cleanup_options:
+        st.session_state[CLEANUP_PROVIDER_KEY] = cleanup_options[0]
+    cleanup_provider = st.radio(
         "Transcript cleanup provider",
-        options=[OPENAI_CLEANUP_PROVIDER],
+        options=cleanup_options,
         key=CLEANUP_PROVIDER_KEY,
         horizontal=True,
+        disabled=not available_cleanup,
         help="Cleanup fixes grammar, punctuation, and line grouping after transcription.",
     )
-    st.caption(f"Using OpenAI cleanup model `{settings.cleanup_model}`.")
-    if st.button("Extract Audio and Transcribe", type="primary"):
+    cleanup_models = {
+        OPENAI_CLEANUP_PROVIDER: settings.cleanup_model,
+        GEMINI_CLEANUP_PROVIDER: settings.gemini_model,
+        OPENROUTER_CLEANUP_PROVIDER: settings.openrouter_model,
+    }
+    if cleanup_provider in cleanup_models:
+        st.caption(
+            f"Using {cleanup_provider} cleanup model "
+            f"`{cleanup_models[cleanup_provider]}`."
+        )
+    can_start = bool(available_transcription and available_cleanup)
+    if transcription_mode == SPEAKER_AWARE_TRANSCRIPTION_MODE:
+        can_start = can_start and bool(settings.openai_api_key)
+    if st.button(
+        "Extract Audio and Transcribe", type="primary", disabled=not can_start
+    ):
         save_session_project(st.session_state, settings.outputs_dir, stage="upload")
         st.session_state["stage"] = "processing_transcript"
         st.rerun()
@@ -169,7 +217,7 @@ def _apply_upload_stage_transcript(
     if suffix == ".srt":
         transcript = transcript_from_srt(content, settings.char_limit_margin)
         _prepare_media_for_import(settings, video_path)
-        transcript = _apply_char_limits(
+        transcript = apply_char_limits(
             transcript,
             settings.char_limit_margin,
             _media_duration_seconds(),
@@ -186,7 +234,7 @@ def _apply_upload_stage_transcript(
                 content, settings.char_limit_margin
             )
             _prepare_media_for_import(settings, video_path)
-            transcript = _apply_char_limits(
+            transcript = apply_char_limits(
                 transcript,
                 settings.char_limit_margin,
                 _media_duration_seconds(),
@@ -266,7 +314,7 @@ def process_transcription(settings: Settings) -> None:
             media_asset = run.media_asset
             audio_path = run.extracted_audio
             transcript = run.transcript
-            transcript = _apply_char_limits(
+            transcript = apply_char_limits(
                 transcript,
                 settings.char_limit_margin,
                 media_asset.duration_seconds,
@@ -482,37 +530,6 @@ def _current_source_video() -> Path | None:
     return path if path.exists() else None
 
 
-def _apply_char_limits(
-    transcript: Transcript,
-    margin: int,
-    media_duration_seconds: float | None = None,
-    chars_per_second: float | None = None,
-    guard_gap_ms: int = 0,
-) -> Transcript:
-    updated_cues = []
-    final_char_limit = _expanded_final_char_limit(
-        transcript.cues,
-        media_duration_seconds,
-        chars_per_second,
-        margin,
-        guard_gap_ms,
-    )
-    for index, cue in enumerate(transcript.cues):
-        original_text = cue.original_text or cue.text
-        char_limit = max(1, len(original_text) + margin)
-        if final_char_limit is not None and index == len(transcript.cues) - 1:
-            char_limit = max(char_limit, final_char_limit)
-        updated_cues.append(
-            cue.model_copy(
-                update={
-                    "char_limit": char_limit,
-                    "over_limit": False,
-                }
-            )
-        )
-    return transcript.model_copy(update={"cues": updated_cues})
-
-
 def _apply_final_char_limit_to_cue_dicts(
     cues: list[dict],
     media_duration_seconds: float | None,
@@ -521,7 +538,7 @@ def _apply_final_char_limit_to_cue_dicts(
     guard_gap_ms: int,
 ) -> None:
     model_cues = [Cue(**cue) for cue in cues]
-    final_char_limit = _expanded_final_char_limit(
+    final_char_limit = expanded_final_char_limit(
         model_cues,
         media_duration_seconds,
         chars_per_second,
@@ -534,28 +551,6 @@ def _apply_final_char_limit_to_cue_dicts(
     cues[-1]["over_limit"] = (
         len(str(cues[-1].get("text") or "")) > cues[-1]["char_limit"]
     )
-
-
-def _expanded_final_char_limit(
-    cues: list[Cue],
-    media_duration_seconds: float | None,
-    chars_per_second: float | None,
-    margin: int,
-    guard_gap_ms: int,
-) -> int | None:
-    if not cues or media_duration_seconds is None or chars_per_second is None:
-        return None
-    final_cue = cues[-1]
-    guard_gap_seconds = guard_gap_ms / 1000
-    if len(cues) == 1:
-        start_seconds = 0.0
-    else:
-        start_seconds = min(
-            final_cue.start_seconds, cues[-2].end_seconds + guard_gap_seconds
-        )
-    end_seconds = max(final_cue.end_seconds, media_duration_seconds)
-    usable_seconds = max(0.0, end_seconds - start_seconds - guard_gap_seconds)
-    return max(1, int(usable_seconds * chars_per_second) + margin)
 
 
 def _media_duration_seconds() -> float | None:
@@ -586,39 +581,62 @@ def _build_transcription_service(settings: Settings):
             model=DIARIZATION_MODEL,
         )
 
-    if st.session_state.get(TRANSCRIPTION_PROVIDER_KEY) == LOCAL_TRANSCRIPTION_PROVIDER:
-        return LocalWhisperTranscriptionService(
-            model=settings.local_whisper_model,
-            device=settings.local_whisper_device,
-            compute_type=settings.local_whisper_compute_type,
-            beam_size=settings.local_whisper_beam_size,
-        )
-
-    return OpenAITranscriptionService(
-        api_key=settings.openai_api_key,
-        model="whisper-1",
+    selected_label = st.session_state.get(TRANSCRIPTION_PROVIDER_KEY, "")
+    selected = next(
+        (
+            provider.id
+            for provider in transcription_provider_catalog(settings)
+            if provider.label == selected_label
+        ),
+        _default_transcription_provider_id(settings),
     )
+    return build_transcription_service(settings, selected)
 
 
 def _build_cleanup_service(settings: Settings):
-    return OpenAICleanupService(
-        api_key=settings.openai_api_key,
-        model=settings.cleanup_model,
-    )
+    providers = {
+        OPENAI_CLEANUP_PROVIDER: "openai",
+        GEMINI_CLEANUP_PROVIDER: "gemini",
+        OPENROUTER_CLEANUP_PROVIDER: "openrouter",
+    }
+    selected = st.session_state.get(CLEANUP_PROVIDER_KEY, OPENAI_CLEANUP_PROVIDER)
+    return build_cleanup_service(settings, providers.get(selected, "openai"))
 
 
 def _default_transcription_provider(settings: Settings) -> str:
-    if settings.transcription_provider.lower() in {
-        "local",
-        "local-whisper",
-        "local_whisper",
-    }:
-        return LOCAL_TRANSCRIPTION_PROVIDER
-    return OPENAI_TRANSCRIPTION_PROVIDER
+    providers = transcription_provider_catalog(settings)
+    selected = next(
+        (
+            provider
+            for provider in providers
+            if provider.default and provider.configured
+        ),
+        next((provider for provider in providers if provider.configured), providers[0]),
+    )
+    return selected.label
+
+
+def _default_transcription_provider_id(settings: Settings) -> str:
+    providers = transcription_provider_catalog(settings)
+    selected = next(
+        (
+            provider
+            for provider in providers
+            if provider.default and provider.configured
+        ),
+        next((provider for provider in providers if provider.configured), providers[0]),
+    )
+    return selected.id
 
 
 def _default_cleanup_provider(settings: Settings) -> str:
-    return OPENAI_CLEANUP_PROVIDER
+    aliases = {
+        "openai": OPENAI_CLEANUP_PROVIDER,
+        "gemini": GEMINI_CLEANUP_PROVIDER,
+        "gemini-ai-studio": GEMINI_CLEANUP_PROVIDER,
+        "openrouter": OPENROUTER_CLEANUP_PROVIDER,
+    }
+    return aliases.get(settings.cleanup_provider.lower(), OPENAI_CLEANUP_PROVIDER)
 
 
 def _selected_transcription_model(settings: Settings) -> str:

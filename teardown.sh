@@ -2,7 +2,7 @@
 set -eu
 
 CONTAINER_NAME=${CONTAINER_NAME:-demo-dubber}
-IMAGE_NAME=${IMAGE_NAME:-demo-dubber}
+IMAGE_NAME=${IMAGE_NAME:-demo-dubber-web}
 REMOVE_IMAGE=${REMOVE_IMAGE:-0}
 
 if ! command -v docker >/dev/null 2>&1; then

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -20,6 +21,9 @@ class TranscriptCleaner(Protocol):
     def clean_timestamped_transcript(self, transcript: Transcript) -> Transcript: ...
 
 
+ProgressCallback = Callable[[str, int | None, int | None], None]
+
+
 @dataclass(frozen=True)
 class TranscriptionRun:
     media_asset: MediaAsset
@@ -38,32 +42,45 @@ class TranscriptionWorkflow:
         cleaner: TranscriptCleaner,
         chunk_seconds: int = 600,
         overlap_seconds: float = 1.0,
+        progress_callback: ProgressCallback | None = None,
     ) -> None:
         self._ffmpeg = ffmpeg
         self._transcriber = transcriber
         self._cleaner = cleaner
         self._chunk_seconds = chunk_seconds
         self._overlap_seconds = overlap_seconds
+        self._progress_callback = progress_callback
 
     def run(self, video_path: Path, output_dir: Path) -> TranscriptionRun:
+        self._report_progress("Preparing audio", 0, 4)
         media_asset = self._ffmpeg.probe_video(video_path)
         audio_path = output_dir / f"{video_path.stem}.wav"
         self._ffmpeg.extract_audio(video_path, audio_path)
         duration = float(media_asset.duration_seconds or 0.0)
 
         if duration > self._chunk_seconds:
+            self._report_progress("Transcribing and cleaning audio chunks", 1, 4)
             transcript = self._transcribe_chunked(audio_path, output_dir, duration)
         else:
-            transcript = self._cleaner.clean_timestamped_transcript(
-                self._transcriber.transcribe_with_timestamps(audio_path)
-            )
+            self._report_progress("Transcribing audio", 1, 4)
+            raw_transcript = self._transcriber.transcribe_with_timestamps(audio_path)
+            self._report_progress("Cleaning transcript", 2, 4)
+            transcript = self._cleaner.clean_timestamped_transcript(raw_transcript)
 
+        self._report_progress("Validating transcript", 3, 4)
         transcript = validate_transcript_timeline(
             transcript, total_duration=duration or None
         )
+        self._report_progress("Transcript ready", 4, 4)
         return TranscriptionRun(
             media_asset=media_asset, extracted_audio=audio_path, transcript=transcript
         )
+
+    def _report_progress(
+        self, message: str, completed: int | None, total: int | None
+    ) -> None:
+        if self._progress_callback is not None:
+            self._progress_callback(message, completed, total)
 
     def _transcribe_chunked(
         self, audio_path: Path, output_dir: Path, total_duration: float

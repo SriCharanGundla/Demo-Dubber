@@ -11,7 +11,11 @@ import streamlit as st
 
 from demo_dubber.config import Settings
 from demo_dubber.models import Cue, RenderArtifacts, SynthesisResult
-from demo_dubber.services.cue_fit import next_quality_adjustment, quality_speed_steps
+from demo_dubber.services.cue_fit import (
+    duration_matched_speed,
+    next_quality_adjustment,
+    quality_speed_steps,
+)
 from demo_dubber.services.ffmpeg import FFmpegService
 from demo_dubber.services.kokoro_synthesize import KokoroSynthesisService
 from demo_dubber.services.project_store import (
@@ -64,7 +68,7 @@ def process_render(settings: Settings) -> None:
         workflow = RenderWorkflow(
             settings=settings,
             ffmpeg=FFmpegService(),
-            narration_generator=_generate_narration,
+            narration_generator=generate_narration,
         )
         artifacts = workflow.run(
             cues=cues,
@@ -127,7 +131,7 @@ def _load_cues() -> list[Cue]:
     return [Cue(**cue) for cue in cue_dicts]
 
 
-def _generate_narration(
+def generate_narration(
     cues: list[Cue],
     media_asset: dict,
     settings: Settings,
@@ -155,7 +159,9 @@ def _generate_narration(
     progress_path = output_dir / "render_progress.json"
     progress_payload = _load_progress(progress_path)
     results = []
-    speed_steps = quality_speed_steps(base_speed, settings.max_kokoro_speed)
+    speed_steps = quality_speed_steps(
+        settings.min_kokoro_speed, settings.max_kokoro_speed
+    )
     total_steps = len(cues) + 3
     total_duration = float(
         media_asset.get("duration_seconds") or max(cue.end_seconds for cue in cues)
@@ -217,7 +223,25 @@ def _generate_narration(
             output_path=segment_dir / f"cue_{cue.index:04}.wav",
             speed=base_speed,
         )
+        matched_speed = duration_matched_speed(
+            base_speed,
+            settings.min_kokoro_speed,
+            result.duration_seconds,
+            min(cue.duration_seconds, window_end - window_start),
+        )
+        if matched_speed < base_speed - 1e-6:
+            result = synth.synthesize_cue(
+                cue=cue,
+                output_path=segment_dir / f"cue_{cue.index:04}.wav",
+                speed=matched_speed,
+            )
         results.append(result)
+        speed_positions[cue.index] = min(
+            range(len(speed_steps)),
+            key=lambda position: abs(
+                speed_steps[position] - result.applied_speed
+            ),
+        )
         _save_cached_result(
             progress_path=progress_path,
             progress_payload=progress_payload,
@@ -481,7 +505,7 @@ def _timeline_signature(
     cues: list[Cue], total_duration: float, settings: Settings
 ) -> str:
     payload = {
-        "algorithm": "quality-constrained-v2",
+        "algorithm": "quality-constrained-v3-duration-matched",
         "cues": [
             {
                 "index": cue.index,
@@ -493,6 +517,7 @@ def _timeline_signature(
         ],
         "total_duration": total_duration,
         "base_speed": settings.kokoro_speed,
+        "min_speed": settings.min_kokoro_speed,
         "max_speed": settings.max_kokoro_speed,
         "max_compression": settings.max_tempo_compression_ratio,
         "max_shift": settings.max_cue_shift_seconds,

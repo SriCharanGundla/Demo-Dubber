@@ -3,8 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import requests
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
 
 from demo_dubber.models import Cue, Transcript
 
@@ -208,84 +207,95 @@ class OpenAICleanupService(TranscriptCleanupValidator):
 
 class OpenAICompatibleChatCleanupService(TranscriptCleanupValidator):
     def __init__(
-        self, base_url: str, token: str | None, model: str = "giga-brain"
+        self,
+        base_url: str,
+        token: str | None,
+        model: str = "giga-brain",
+        provider_name: str = "OpenAI-compatible provider",
+        default_headers: dict[str, str] | None = None,
+        require_structured_parameters: bool = False,
     ) -> None:
-        self._base_url = base_url.rstrip("/")
-        self._token = token
         self._model = model
+        self._provider_name = provider_name
+        self._require_structured_parameters = require_structured_parameters
+        self._client = (
+            OpenAI(
+                api_key=token,
+                base_url=f"{base_url.rstrip('/')}/",
+                default_headers=default_headers,
+            )
+            if token
+            else None
+        )
 
     def clean_timestamped_transcript(self, transcript: Transcript) -> Transcript:
-        if not self._token:
-            raise RuntimeError("Cleanup provider token is not configured")
+        if self._client is None:
+            raise RuntimeError(f"{self._provider_name} API key is not configured")
 
-        payload = {
-            "model": self._model,
-            "messages": [
-                {"role": "system", "content": CLEANUP_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        self._build_payload(transcript), ensure_ascii=True
-                    ),
-                },
-            ],
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "cleaned_transcript",
-                    "strict": True,
-                    "schema": CLEANUP_RESPONSE_SCHEMA,
-                },
+        messages = [
+            {"role": "system", "content": CLEANUP_PROMPT},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    self._build_payload(transcript), ensure_ascii=True
+                ),
             },
-            "stream": True,
+        ]
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": "cleaned_transcript",
+                "strict": True,
+                "schema": CLEANUP_RESPONSE_SCHEMA,
+            },
         }
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
+
+        try:
+            return self._request_and_validate(
+                transcript,
+                messages,
+                response_format=response_format,
+                require_structured_parameters=self._require_structured_parameters,
+            )
+        except OpenAIError:
+            # Some OpenAI-compatible models do not implement json_schema. The
+            # prompt still requires JSON, and local validation remains mandatory.
+            return self._request_and_validate(transcript, messages)
+
+    def _request_and_validate(
+        self,
+        transcript: Transcript,
+        messages: list[dict[str, str]],
+        response_format: dict[str, Any] | None = None,
+        require_structured_parameters: bool = False,
+    ) -> Transcript:
+        if self._client is None:  # Guarded by the public method.
+            raise RuntimeError(f"{self._provider_name} API key is not configured")
+
+        request: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
         }
+        if response_format is not None:
+            request["response_format"] = response_format
+        if require_structured_parameters:
+            request["extra_body"] = {"provider": {"require_parameters": True}}
+
         last_error: RuntimeError | TypeError | None = None
         for _attempt in range(2):
-            output_text = self._post_streaming_chat_completion(payload, headers)
+            response = self._client.chat.completions.create(**request)
             try:
+                output_text = response.choices[0].message.content or ""
                 cleaned = self._parse_response_text(output_text)
                 return self._validate_and_build(cleaned, transcript)
-            except (RuntimeError, TypeError) as exc:
-                last_error = exc
+            except (IndexError, RuntimeError, TypeError) as exc:
+                last_error = (
+                    RuntimeError("Transcript cleanup returned no completion choices.")
+                    if isinstance(exc, IndexError)
+                    else exc
+                )
+
         raise RuntimeError(
-            "Transcript cleanup failed validation after 2 attempts."
+            f"{self._provider_name} transcript cleanup failed validation "
+            "after 2 attempts."
         ) from last_error
-
-    def _post_streaming_chat_completion(
-        self, payload: dict[str, Any], headers: dict[str, str]
-    ) -> str:
-        url = f"{self._base_url}/chat/completions"
-        chunks: list[str] = []
-        try:
-            with requests.post(
-                url, headers=headers, json=payload, stream=True, timeout=120
-            ) as response:
-                response.raise_for_status()
-                for line in response.iter_lines():
-                    if not line:
-                        continue
-                    decoded = line.decode("utf-8")
-                    if not decoded.startswith("data: "):
-                        continue
-                    data = decoded[len("data: ") :].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    delta = event.get("choices", [{}])[0].get("delta", {})
-                    content = delta.get("content")
-                    if content:
-                        chunks.append(content)
-        except requests.RequestException as exc:
-            raise RuntimeError(
-                f"OpenAI-compatible cleanup request failed: {exc}"
-            ) from exc
-
-        return "".join(chunks)
