@@ -36,6 +36,8 @@ class SavedProjectState(BaseModel):
     transcription_mode: str | None = None
     transcription_provider: str | None = None
     cleanup_provider: str | None = None
+    tts_voice: str | None = None
+    tts_language: str | None = None
     speaker_recognition_enabled: bool | None = None
     uploaded_filename: str | None = None
     output_dir: Path
@@ -82,7 +84,7 @@ def scan_saved_projects(
         if project is not None:
             # The directory being enumerated is authoritative. Never trust a
             # serialized deletion target from project_state.json.
-            projects.append(project.model_copy(update={"output_dir": child.resolve()}))
+            projects.append(_rebase_project_paths(project, child.resolve()))
         elif (child / PROJECT_STATE_FILENAME).exists():
             errors.append(child.name)
 
@@ -103,6 +105,41 @@ def load_project_state(output_dir: Path) -> SavedProjectState | None:
         logger.warning("Could not load project state from %s: %s", state_path, exc)
         return None
 
+
+def _rebase_project_paths(
+    project: SavedProjectState, output_dir: Path
+) -> SavedProjectState:
+    """Make paths portable when an outputs directory moves or is mounted."""
+    previous_output_dir = project.output_dir
+    updates: dict[str, object] = {"output_dir": output_dir}
+    if (
+        previous_output_dir == output_dir
+        or previous_output_dir.name != output_dir.name
+    ):
+        return project.model_copy(update=updates)
+
+    def rebase(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: rebase(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [rebase(item) for item in value]
+        if not isinstance(value, (str, Path)):
+            return value
+
+        path = Path(value)
+        try:
+            relative = path.relative_to(previous_output_dir)
+        except ValueError:
+            return value
+        rebased = output_dir / relative
+        return rebased if isinstance(value, Path) else str(rebased)
+
+    updates.update(
+        source_video=rebase(project.source_video),
+        media_asset=rebase(project.media_asset),
+        artifacts=rebase(project.artifacts),
+    )
+    return project.model_copy(update=updates)
 
 def save_project_state(project: SavedProjectState) -> SavedProjectState:
     """Persist a framework-independent project snapshot atomically."""
@@ -154,6 +191,10 @@ def save_session_project(
             session_state.get("transcription_provider")
         ),
         cleanup_provider=_string_or_none(session_state.get("cleanup_provider")),
+        tts_voice=_string_or_none(session_state.get("tts_voice"))
+        or (current.tts_voice if current is not None else None),
+        tts_language=_string_or_none(session_state.get("tts_language"))
+        or (current.tts_language if current is not None else None),
         uploaded_filename=uploaded_filename,
         output_dir=output_dir,
         source_video=source_video,
@@ -185,6 +226,8 @@ def restore_project_session(
         project.transcription_provider or "OpenAI Whisper"
     )
     session_state["cleanup_provider"] = project.cleanup_provider or "OpenAI"
+    session_state["tts_voice"] = project.tts_voice
+    session_state["tts_language"] = project.tts_language
     session_state["media_asset"] = dict(project.media_asset)
     session_state["transcript"] = dict(project.transcript)
     session_state["transcript_cues"] = [dict(cue) for cue in project.transcript_cues]

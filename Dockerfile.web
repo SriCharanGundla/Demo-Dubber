@@ -1,0 +1,95 @@
+FROM node:22-slim AS web-build
+
+WORKDIR /app
+
+RUN corepack enable && corepack prepare pnpm@11.21.0 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/package.json
+RUN pnpm install --frozen-lockfile
+
+COPY apps/web apps/web
+RUN pnpm --filter @demo-dubber/web build
+
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_VERSION=0.8.17 \
+    UV_LINK_MODE=copy \
+    UV_HTTP_TIMEOUT=120 \
+    UV_HTTP_RETRIES=5 \
+    UV_NATIVE_TLS=1 \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    HF_HOME=/opt/huggingface \
+    HF_HUB_DISABLE_XET=1 \
+    HF_HUB_DOWNLOAD_TIMEOUT=120
+
+WORKDIR /app
+
+ARG PREWARM_KOKORO=1
+ARG PREWARM_WHISPER=1
+ARG KOKORO_VOICE=af_heart
+ARG KOKORO_LANG_CODE=a
+ARG KOKORO_REPO_ID=hexgrad/Kokoro-82M
+ARG WHISPER_MODEL=medium.en
+
+ENV KOKORO_VOICE=$KOKORO_VOICE \
+    KOKORO_LANG_CODE=$KOKORO_LANG_CODE \
+    KOKORO_REPO_ID=$KOKORO_REPO_ID \
+    DEMO_DUBBER_LOCAL_WHISPER_MODEL=$WHISPER_MODEL \
+    DEMO_DUBBER_LOCAL_WHISPER_DEVICE=cpu \
+    DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8 \
+    DEMO_DUBBER_VOICE_CATALOG=/app/assets/kokoro_voices.json \
+    DEMO_DUBBER_VOICE_SAMPLES=/opt/kokoro-voice-samples \
+    DEMO_DUBBER_OUTPUTS=/app/outputs \
+    DEMO_DUBBER_WORKSPACE=/app/workspace
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=secret,id=ca_bundle,required=false \
+    if [ -f /run/secrets/ca_bundle ]; then \
+      cp /run/secrets/ca_bundle /etc/ssl/certs/ca-certificates.crt; \
+    fi
+
+RUN python -m pip install "uv==$UV_VERSION"
+
+COPY pyproject.toml uv.lock README.md ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-dev --native-tls
+
+COPY scripts/prewarm_kokoro.py scripts/prewarm_kokoro.py
+COPY scripts/prewarm_whisper.py scripts/prewarm_whisper.py
+COPY assets/kokoro_voices.json assets/kokoro_voices.json
+RUN mkdir -p "$HF_HOME" "$DEMO_DUBBER_VOICE_SAMPLES" /app/outputs /app/workspace
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ "$PREWARM_WHISPER" = "1" ]; then \
+      if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+      uv run python scripts/prewarm_whisper.py; \
+    else \
+      echo "Skipping Whisper prewarm during build"; \
+    fi
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ "$PREWARM_KOKORO" = "1" ]; then \
+      if [ -f /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+      uv run python scripts/prewarm_kokoro.py; \
+    else \
+      echo "Skipping Kokoro prewarm during build"; \
+    fi
+
+COPY . .
+COPY --from=web-build /app/apps/web/dist /app/apps/web/dist
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD curl --fail http://127.0.0.1:8000/api/health || exit 1
+
+CMD ["uv", "run", "--frozen", "uvicorn", "apps.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

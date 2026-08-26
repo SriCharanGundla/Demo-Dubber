@@ -1,6 +1,24 @@
 from __future__ import annotations
 
 
+def duration_matched_speed(
+    base_speed: float,
+    min_speed: float,
+    natural_duration_seconds: float,
+    target_duration_seconds: float,
+    tolerance: float = 0.05,
+) -> float:
+    """Choose a bounded Kokoro speed that fills a short original cue."""
+    if target_duration_seconds <= 0 or natural_duration_seconds <= 0:
+        return base_speed
+    if natural_duration_seconds >= target_duration_seconds * (1 - tolerance):
+        return base_speed
+    estimated_speed = base_speed * (
+        natural_duration_seconds / target_duration_seconds
+    )
+    return round(max(min_speed, min(base_speed, estimated_speed)), 4)
+
+
 def quality_speed_steps(
     base_speed: float, max_speed: float, step: float = 0.05
 ) -> list[float]:

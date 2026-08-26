@@ -11,12 +11,24 @@ from typing import Annotated, Literal
 from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from apps.api.jobs import InMemoryJobStore
+from apps.api.jobs import ActiveJobError, InMemoryJobStore
 from demo_dubber.config import get_settings
 from demo_dubber.models import Cue, RenderArtifacts, Transcript
+from demo_dubber.services.cue_preview import (
+    available_tts_seconds,
+    generate_tts_preview,
+    load_tts_preview,
+)
+from demo_dubber.services.export import export_srt, export_text
 from demo_dubber.services.ffmpeg import FFmpegService
+from demo_dubber.services.kokoro_voices import (
+    validate_voice,
+    voice_language_code,
+    voice_options,
+)
 from demo_dubber.services.project_store import (
     SavedProjectState,
     create_project_output_dir,
@@ -68,10 +80,21 @@ class TranscriptionRequest(BaseModel):
         "openai", "local-auto", "local-cpu", "local-cuda", "local-mps"
     ] = "local-auto"
     cleanup_provider: Literal["openai", "gemini", "openrouter"] = "openai"
+    tts_voice: str = Field(default="af_heart", min_length=1, max_length=80)
 
 
 class TranscriptUpdate(BaseModel):
     cues: list[Cue] = Field(min_length=1)
+
+
+class ProjectUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+
+class TTSPreviewRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=5_000)
+    voice: str | None = None
+    speed: float | None = Field(default=None, gt=0)
 
 
 def _project(project_id: str) -> SavedProjectState:
@@ -80,6 +103,38 @@ def _project(project_id: str) -> SavedProjectState:
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+def _project_payload(project: SavedProjectState) -> dict[str, object]:
+    payload = project.model_dump(mode="json")
+    active_job = jobs.active_for_project(project.project_id)
+    payload["active_job"] = active_job.as_dict() if active_job is not None else None
+    return payload
+
+
+def _require_idle_project(project_id: str) -> None:
+    active = jobs.active_for_project(project_id)
+    if active is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {active.kind} job is active for this project",
+        )
+
+
+def _project_cues(project: SavedProjectState) -> list[Cue]:
+    if not project.transcript_cues:
+        raise HTTPException(status_code=409, detail="Transcript is missing")
+    return [Cue(**cue) for cue in project.transcript_cues]
+
+
+def _cue_at(project: SavedProjectState, cue_index: int) -> tuple[list[Cue], int, Cue]:
+    cues = _project_cues(project)
+    position = next(
+        (position for position, cue in enumerate(cues) if cue.index == cue_index), None
+    )
+    if position is None:
+        raise HTTPException(status_code=404, detail="Cue not found")
+    return cues, position, cues[position]
 
 
 def _save_uploaded_file(upload: UploadFile, output_dir: Path) -> Path:
@@ -113,11 +168,46 @@ def providers() -> dict[str, object]:
     }
 
 
+@app.get("/api/voices")
+def voices() -> dict[str, object]:
+    options = voice_options(
+        settings.kokoro_voice_catalog, settings.kokoro_voice_samples_dir
+    )
+    return {
+        "voices": [
+            {
+                **option,
+                "sample_url": f"/api/voices/{option['id']}/sample",
+            }
+            for option in options
+        ],
+        "default_voice": settings.kokoro_voice,
+    }
+
+
+@app.get("/api/voices/{voice_id}/sample")
+def voice_sample(voice_id: str) -> FileResponse:
+    language_code = voice_id[0] if voice_id else ""
+    if not validate_voice(
+        settings.kokoro_voice_catalog, voice_id, language_code
+    ):
+        raise HTTPException(status_code=404, detail="Voice not found")
+    sample_path = settings.kokoro_voice_samples_dir / f"{voice_id}.wav"
+    if not sample_path.is_file():
+        raise HTTPException(status_code=404, detail="Voice sample is unavailable")
+    return FileResponse(
+        sample_path,
+        media_type="audio/wav",
+        filename=sample_path.name,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @app.get("/api/projects")
 def projects() -> dict[str, object]:
     found, errors = scan_saved_projects(settings.outputs_dir)
     return {
-        "projects": [item.model_dump(mode="json") for item in found],
+        "projects": [_project_payload(item) for item in found],
         "unreadable_projects": errors,
     }
 
@@ -137,6 +227,8 @@ def create_project(video: Annotated[UploadFile, File()]) -> dict[str, object]:
         title=filename,
         output_dir=output_dir.resolve(),
         source_video=source_video.resolve(),
+        tts_voice=settings.kokoro_voice,
+        tts_language=voice_language_code(settings.kokoro_voice),
         uploaded_filename=filename,
         created_at=now,
         updated_at=now,
@@ -147,12 +239,26 @@ def create_project(video: Annotated[UploadFile, File()]) -> dict[str, object]:
 
 @app.get("/api/projects/{project_id}")
 def get_project(project_id: str) -> dict[str, object]:
-    return _project(project_id).model_dump(mode="json")
+    return _project_payload(_project(project_id))
+
+
+@app.patch("/api/projects/{project_id}")
+def update_project(project_id: str, update: ProjectUpdate) -> dict[str, object]:
+    project = _project(project_id)
+    _require_idle_project(project_id)
+    title = " ".join(update.title.split())
+    if not title:
+        raise HTTPException(status_code=422, detail="Project name cannot be blank")
+    saved = project.model_copy(update={"title": title, "updated_at": datetime.now(UTC)})
+    save_project_state(saved)
+    return saved.model_dump(mode="json")
 
 
 @app.delete("/api/projects/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def remove_project(project_id: str) -> None:
-    delete_project(_project(project_id), settings.outputs_dir)
+    project = _project(project_id)
+    _require_idle_project(project_id)
+    delete_project(project, settings.outputs_dir)
 
 
 @app.post("/api/projects/{project_id}/transcribe", status_code=status.HTTP_202_ACCEPTED)
@@ -162,6 +268,12 @@ def transcribe_project(
     background_tasks: BackgroundTasks,
 ) -> dict[str, object]:
     project = _project(project_id)
+    if not validate_voice(
+        settings.kokoro_voice_catalog,
+        request.tts_voice,
+        request.tts_voice[0],
+    ):
+        raise HTTPException(status_code=422, detail="Unsupported Kokoro voice")
     if project.source_video is None or not project.source_video.exists():
         raise HTTPException(status_code=409, detail="Source video is missing")
     transcription_provider = next(
@@ -190,7 +302,18 @@ def transcribe_project(
             status_code=409,
             detail=f"{request.cleanup_provider} cleanup is not configured",
         )
-    job = jobs.create(project_id, "transcription")
+    try:
+        job = jobs.create(project_id, "transcription")
+    except ActiveJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    project = project.model_copy(
+        update={
+            "tts_voice": request.tts_voice,
+            "tts_language": voice_language_code(request.tts_voice),
+            "updated_at": datetime.now(UTC),
+        }
+    )
+    save_project_state(project)
     background_tasks.add_task(_run_transcription, job.id, project, request)
     return job.as_dict()
 
@@ -199,6 +322,10 @@ def _run_transcription(
     job_id: str, project: SavedProjectState, request: TranscriptionRequest
 ) -> None:
     jobs.update(job_id, status="running", message="Extracting and transcribing audio")
+
+    def progress(message: str, completed: int | None, total: int | None) -> None:
+        jobs.update(job_id, message=message, completed=completed, total=total)
+
     try:
         transcriber = build_transcription_service(
             settings, request.transcription_provider
@@ -209,6 +336,7 @@ def _run_transcription(
             cleaner=build_cleanup_service(settings, request.cleanup_provider),
             chunk_seconds=settings.transcription_chunk_seconds,
             overlap_seconds=settings.transcription_chunk_overlap_seconds,
+            progress_callback=progress,
         )
         run = workflow.run(project.source_video, project.output_dir)
         transcript = apply_char_limits(
@@ -241,9 +369,28 @@ def _run_transcription(
         jobs.update(job_id, status="succeeded", message="Transcript ready")
     except Exception as exc:
         logger.exception("Transcription failed for project %s", project.project_id)
+        current = jobs.get(job_id)
         jobs.update(
-            job_id, status="failed", message="Transcription failed", error=str(exc)
+            job_id,
+            status="failed",
+            message="Transcription failed",
+            error=str(exc),
+            failed_at=current.message if current is not None else "Transcribing audio",
         )
+
+
+@app.get("/api/projects/{project_id}/jobs/active")
+def active_job(project_id: str) -> dict[str, object]:
+    _project(project_id)
+    job = jobs.active_for_project(project_id)
+    return {"job": job.as_dict() if job is not None else None}
+
+
+@app.get("/api/projects/{project_id}/jobs/latest")
+def latest_job(project_id: str) -> dict[str, object]:
+    _project(project_id)
+    job = jobs.latest_for_project(project_id)
+    return {"job": job.as_dict() if job is not None else None}
 
 
 @app.get("/api/projects/{project_id}/jobs/{job_id}")
@@ -266,6 +413,7 @@ def get_transcript(project_id: str) -> dict[str, object]:
 @app.put("/api/projects/{project_id}/transcript")
 def update_transcript(project_id: str, update: TranscriptUpdate) -> dict[str, object]:
     project = _project(project_id)
+    _require_idle_project(project_id)
     duration = project.media_asset.get("duration_seconds")
     transcript = validate_transcript_timeline(
         Transcript(
@@ -295,6 +443,144 @@ def update_transcript(project_id: str, update: TranscriptUpdate) -> dict[str, ob
     return {"cues": saved.transcript_cues}
 
 
+@app.get("/api/projects/{project_id}/exports/{export_format}")
+def export_transcript(project_id: str, export_format: str) -> FileResponse:
+    project = _project(project_id)
+    cues = _project_cues(project)
+    exporters = {
+        "srt": ("subtitled_srt", export_srt, project.output_dir / "transcript.srt"),
+        "txt": ("transcript_txt", export_text, project.output_dir / "transcript.txt"),
+    }
+    selected = exporters.get(export_format.lower())
+    if selected is None:
+        raise HTTPException(status_code=404, detail="Export format not found")
+    artifact_name, exporter, output_path = selected
+    path = exporter(cues, output_path)
+    artifacts = {**project.artifacts, artifact_name: path}
+    save_project_state(
+        project.model_copy(
+            update={"artifacts": artifacts, "updated_at": datetime.now(UTC)}
+        )
+    )
+    return FileResponse(path, filename=path.name)
+
+
+@app.get("/api/projects/{project_id}/previews/original/{kind}/{cue_index}")
+def original_cue_preview(project_id: str, kind: str, cue_index: int) -> FileResponse:
+    project = _project(project_id)
+    _cues, _position, cue = _cue_at(project, cue_index)
+    preview_root = project.output_dir / "editor_previews" / kind
+    preview_root.mkdir(parents=True, exist_ok=True)
+    if kind == "audio":
+        source = Path(str(project.media_asset.get("extracted_audio") or ""))
+        suffix = ".wav"
+    elif kind == "video":
+        source = project.source_video
+        suffix = ".mp4"
+    else:
+        raise HTTPException(status_code=404, detail="Preview type not found")
+    if source is None or not source.is_file():
+        raise HTTPException(status_code=404, detail="Preview source is missing")
+    output_path = preview_root / (
+        f"cue_{cue.index:04}_{int(cue.start_seconds * 1000):08}_"
+        f"{int(cue.end_seconds * 1000):08}{suffix}"
+    )
+    if not output_path.is_file():
+        ffmpeg = FFmpegService()
+        if kind == "audio":
+            ffmpeg.extract_audio_clip(
+                audio_path=source,
+                output_path=output_path,
+                start_seconds=cue.start_seconds,
+                duration_seconds=cue.duration_seconds,
+            )
+        else:
+            ffmpeg.extract_video_clip(
+                video_path=source,
+                output_path=output_path,
+                start_seconds=cue.start_seconds,
+                duration_seconds=cue.duration_seconds,
+            )
+    return FileResponse(output_path, filename=output_path.name)
+
+
+@app.post("/api/projects/{project_id}/previews/tts/{cue_index}")
+def create_tts_preview(
+    project_id: str, cue_index: int, request: TTSPreviewRequest
+) -> dict[str, object]:
+    project = _project(project_id)
+    _require_idle_project(project_id)
+    cues, position, cue = _cue_at(project, cue_index)
+    preview_text = request.text.strip()
+    if not preview_text:
+        raise HTTPException(status_code=422, detail="Preview text cannot be blank")
+    cue = cue.model_copy(update={"text": preview_text})
+    media_duration = float(
+        project.media_asset.get("duration_seconds") or cue.end_seconds
+    )
+    available_seconds = available_tts_seconds(
+        cues,
+        position,
+        media_duration_seconds=media_duration,
+        guard_gap_ms=settings.guard_gap_ms,
+    )
+    selected_voice = request.voice or project.tts_voice or settings.kokoro_voice
+    selected_language = voice_language_code(selected_voice)
+    if not validate_voice(
+        settings.kokoro_voice_catalog, selected_voice, selected_language
+    ):
+        raise HTTPException(status_code=422, detail="Unsupported Kokoro voice")
+    preview_settings = settings.model_copy(
+        update={"kokoro_lang_code": selected_language}
+    )
+    preview = generate_tts_preview(
+        project_id=project.project_id,
+        output_dir=project.output_dir,
+        cue=cue,
+        available_seconds=available_seconds,
+        settings=preview_settings,
+        voice=selected_voice,
+        speed=request.speed or settings.kokoro_speed,
+    )
+    payload = preview.model_dump(mode="json", exclude={"audio_path", "natural_audio_path"})
+    return {
+        **payload,
+        "audio_url": (
+            f"/api/projects/{project_id}/previews/tts/{cue_index}/"
+            f"{preview.signature}/audio"
+        ),
+        "natural_audio_url": (
+            f"/api/projects/{project_id}/previews/tts/{cue_index}/"
+            f"{preview.signature}/natural"
+        ),
+    }
+
+
+@app.get(
+    "/api/projects/{project_id}/previews/tts/{cue_index}/{signature}/{variant}"
+)
+def download_tts_preview(
+    project_id: str, cue_index: int, signature: str, variant: str
+) -> FileResponse:
+    project = _project(project_id)
+    _cues, _position, _cue = _cue_at(project, cue_index)
+    preview = load_tts_preview(project.output_dir, cue_index, signature)
+    if preview is None:
+        raise HTTPException(status_code=404, detail="TTS preview not found")
+    paths = {"audio": preview.audio_path, "natural": preview.natural_audio_path}
+    path = paths.get(variant)
+    if path is None:
+        raise HTTPException(status_code=404, detail="TTS preview not found")
+    path = path.resolve()
+    try:
+        path.relative_to(project.output_dir.resolve())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid preview path") from exc
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="TTS preview not found")
+    return FileResponse(path, filename=path.name, media_type="audio/wav")
+
+
 @app.post("/api/projects/{project_id}/render", status_code=status.HTTP_202_ACCEPTED)
 def render_project(
     project_id: str, background_tasks: BackgroundTasks
@@ -302,7 +588,10 @@ def render_project(
     project = _project(project_id)
     if not project.transcript_cues:
         raise HTTPException(status_code=409, detail="Transcript is missing")
-    job = jobs.create(project_id, "render")
+    try:
+        job = jobs.create(project_id, "render")
+    except ActiveJobError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     background_tasks.add_task(_run_render, job.id, project)
     return job.as_dict()
 
@@ -314,8 +603,15 @@ def _run_render(job_id: str, project: SavedProjectState) -> None:
         jobs.update(job_id, message=message, completed=completed, total=total)
 
     try:
+        project_settings = settings.model_copy(
+            update={
+                "kokoro_voice": project.tts_voice or settings.kokoro_voice,
+                "kokoro_lang_code": project.tts_language
+                or voice_language_code(project.tts_voice or settings.kokoro_voice),
+            }
+        )
         workflow = RenderWorkflow(
-            settings=settings,
+            settings=project_settings,
             ffmpeg=FFmpegService(),
             narration_generator=generate_narration,
         )
@@ -339,7 +635,14 @@ def _run_render(job_id: str, project: SavedProjectState) -> None:
         jobs.update(job_id, status="succeeded", message="Render ready")
     except Exception as exc:
         logger.exception("Render failed for project %s", project.project_id)
-        jobs.update(job_id, status="failed", message="Render failed", error=str(exc))
+        current = jobs.get(job_id)
+        jobs.update(
+            job_id,
+            status="failed",
+            message="Render failed",
+            error=str(exc),
+            failed_at=current.message if current is not None else "Rendering dubbed demo",
+        )
 
 
 @app.get("/api/projects/{project_id}/artifacts/{artifact_name}")
@@ -359,3 +662,23 @@ def download_artifact(project_id: str, artifact_name: str) -> FileResponse:
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Artifact not found")
     return FileResponse(path, filename=path.name)
+
+
+web_dist = Path(__file__).resolve().parents[1] / "web" / "dist"
+if web_dist.is_dir():
+    assets_dir = web_dist / "assets"
+    if assets_dir.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets_dir), name="web-assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    def web_app(full_path: str) -> FileResponse:
+        if full_path.startswith("api/"):
+            raise HTTPException(status_code=404, detail="Not found")
+        requested = (web_dist / full_path).resolve()
+        try:
+            requested.relative_to(web_dist.resolve())
+        except ValueError:
+            requested = web_dist / "index.html"
+        if not requested.is_file():
+            requested = web_dist / "index.html"
+        return FileResponse(requested)

@@ -15,6 +15,15 @@ tests/          workflow, safety, provider, and API contract tests
 
 The backend exposes project, transcription, transcript editing, rendering, job polling, provider, health, and contained artifact-download endpoints. Interactive API documentation is at `http://localhost:8000/docs`.
 
+The React app uses a resumable four-stage flow:
+
+1. `/projects` — upload, rename, delete, and resume projects.
+2. `/projects/:id/transcribe` — choose providers and monitor transcription phases.
+3. `/projects/:id/transcript` — edit cues, compare original media with fitted TTS, and download SRT/TXT.
+4. `/projects/:id/export` — render, preview, and download the dubbed video and supporting files.
+
+Renaming changes only the displayed title. The project ID and URLs stay stable.
+
 ## Requirements
 
 - Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22+, and pnpm 11+
@@ -110,13 +119,41 @@ See [.env.example](./.env.example) for transcription, timing, Kokoro, workspace,
 2. FFmpeg extracts mono audio; long recordings are transcribed in overlapping chunks.
 3. Cleanup may correct wording and merge adjacent cues, but cannot alter timeline coverage.
 4. Cue edits retain character budgets derived from timing.
-5. Kokoro narration is scheduled globally, borrowing bounded silence and applying conservative speed/tempo adjustments.
-6. The app exports TXT, SRT, narration WAV, and a codec-aware muxed MP4.
+5. The selected American or British Kokoro voice is retained per project; narration duration-matches short cues within a quality floor, then schedules all cues globally with bounded silence, speed, and tempo adjustments.
+6. The app exports TXT, SRT, narration WAV, and a muxed MP4 that stream-copies compatible source video or uses a high-quality fallback.
 
 Project state and artifacts live under `outputs/`. Temporary workspace data lives under `workspace/`. Both can be relocated with environment variables.
 
+## Docker deployments
+
+The supported deployment is the FastAPI + compiled React image:
+
+```bash
+./deploy.sh
+# open http://localhost:8000
+```
+
+The build downloads the configured faster-whisper model, Kokoro model, and all
+28 Kokoro English voice packs into the image. It also renders each voice's
+picker sample once at build time. Docker reuses those immutable model and audio
+layers on later builds, so playing a sample never invokes TTS at runtime.
+Project outputs and workspace data remain in the repo's existing `outputs/`
+and `workspace/` directories; the baked model cache is intentionally not hidden
+by a runtime volume.
+
+Docker Desktop and OrbStack run Linux containers, so macOS Metal and MLX Whisper
+are unavailable inside Docker—even on Apple Silicon. The deployment forces
+CPU `faster-whisper` with `int8`. `Dockerfile.streamlit` remains available for
+manual compatibility builds, but `deploy.sh` runs only the React web app.
+
 ## Deployment notes
 
-The existing `Dockerfile`, `deploy.sh`, and `teardown.sh` continue to deploy the Streamlit version. The new development monorepo runs with `pnpm dev`; production container separation is the next deployment step.
+Rendering and transcription continue when the browser tab is closed, as long as
+the Docker container remains running. Reopening a project reconnects the UI to
+an active job, and completed artifacts remain resumable from disk.
 
-The in-process API job store is intentionally a local single-process adapter. Before scaling the API to multiple workers or machines, replace it with a durable queue and persist job status externally; the frontend polling contract can stay unchanged.
+The in-process API job store is intentionally a local single-process adapter.
+Restarting the container interrupts an active job, though completed project data
+and render checkpoints remain on disk. Before scaling the API to multiple
+workers or machines, replace it with a durable queue and persist job status
+externally; the frontend polling contract can stay unchanged.

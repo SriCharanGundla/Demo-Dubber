@@ -129,39 +129,56 @@ class FFmpegService:
 
     def mux_audio(self, video_path: Path, audio_path: Path, output_path: Path) -> Path:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        source_codec = self.probe_video_codec(video_path)
-        video_args = (
-            ["-c:v", "copy"]
-            if source_codec == "h264"
-            else [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
+        def command(video_args: list[str]) -> list[str]:
+            return [
+                "ffmpeg",
+                "-y",
+                "-i",
+                str(video_path),
+                "-i",
+                str(audio_path),
+                "-map",
+                "0:v:0",
+                "-map",
+                "1:a:0",
+                "-map_metadata",
+                "0",
+                *video_args,
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
             ]
-        )
-        cmd = [
-            "ffmpeg",
-            "-y",
-            "-i",
-            str(video_path),
-            "-i",
-            str(audio_path),
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
-            *video_args,
-            "-c:a",
-            "aac",
-            "-movflags",
-            "+faststart",
-            "-shortest",
-            str(output_path),
-        ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+
+        try:
+            # Preserve the source video bit-for-bit whenever its codec can be
+            # carried by the MP4 output container.
+            subprocess.run(
+                command(["-c:v", "copy"]),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except subprocess.CalledProcessError:
+            # Use a visually lossless fallback only for incompatible codecs.
+            subprocess.run(
+                command(
+                    [
+                        "-c:v",
+                        "libx264",
+                        "-preset",
+                        "slow",
+                        "-crf",
+                        "17",
+                        "-pix_fmt",
+                        "yuv420p",
+                    ]
+                ),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         return output_path

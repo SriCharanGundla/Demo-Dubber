@@ -1,12 +1,18 @@
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown } from "lucide-react";
 
-export function Select({ value, onValueChange, options, label }) {
+export function Select({ value, onValueChange, options, label, disabled }) {
   return (
-    <label className="grid gap-2 text-sm font-medium">
+    <label
+      className={`grid gap-2 text-sm font-medium ${disabled ? "opacity-50" : ""}`}
+    >
       {label}
-      <SelectPrimitive.Root value={value} onValueChange={onValueChange}>
-        <SelectPrimitive.Trigger className="flex w-full items-center justify-between rounded-lg border border-border bg-background px-3 py-2.5">
+      <SelectPrimitive.Root
+        value={value}
+        onValueChange={onValueChange}
+        disabled={disabled}
+      >
+        <SelectPrimitive.Trigger className="flex w-full items-center justify-between rounded-lg border border-border bg-background px-3 py-2.5 disabled:cursor-not-allowed">
           <SelectPrimitive.Value />
           <SelectPrimitive.Icon>
             <ChevronDown size={16} />

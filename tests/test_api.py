@@ -3,19 +3,30 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from apps.api import main as api_module
+from apps.api.jobs import InMemoryJobStore
+from demo_dubber.models import Cue, RenderArtifacts
+from demo_dubber.services.project_store import save_project_state
 
 
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = tempfile.TemporaryDirectory()
         self.original_settings = api_module.settings
+        self.original_jobs = api_module.jobs
+        api_module.jobs = InMemoryJobStore()
+        voice_samples = Path(self.temporary_directory.name) / "voice-samples"
+        voice_samples.mkdir()
+        (voice_samples / "af_heart.wav").write_bytes(b"sample audio")
         api_module.settings = self.original_settings.model_copy(
             update={
                 "outputs_dir": Path(self.temporary_directory.name),
+                "kokoro_voice_catalog": Path("assets/kokoro_voices.json").resolve(),
+                "kokoro_voice_samples_dir": voice_samples,
                 "openai_api_key": None,
                 "gemini_api_key": None,
                 "openrouter_api_key": None,
@@ -25,7 +36,16 @@ class ApiTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         api_module.settings = self.original_settings
+        api_module.jobs = self.original_jobs
         self.temporary_directory.cleanup()
+
+    def _upload_project(self) -> dict[str, object]:
+        response = self.client.post(
+            "/api/projects",
+            files={"video": ("demo.mp4", b"test video", "video/mp4")},
+        )
+        self.assertEqual(response.status_code, 201)
+        return response.json()
 
     def test_health_and_provider_catalog(self) -> None:
         self.assertEqual(self.client.get("/api/health").json(), {"status": "ok"})
@@ -48,14 +68,30 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(transcription["local-auto"]["configured"])
         self.assertTrue(transcription["local-cpu"]["configured"])
 
-    def test_project_upload_list_and_delete(self) -> None:
-        response = self.client.post(
-            "/api/projects",
-            files={"video": ("demo.mp4", b"test video", "video/mp4")},
+    def test_voice_catalog_exposes_only_english_samples(self) -> None:
+        response = self.client.get("/api/voices")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["voices"]), 28)
+        self.assertEqual(
+            {voice["language"] for voice in payload["voices"]},
+            {"American English", "British English"},
         )
-        self.assertEqual(response.status_code, 201)
-        project = response.json()
+        self.assertTrue(
+            all(voice["sample_url"].endswith("/sample") for voice in payload["voices"])
+        )
+        heart = next(voice for voice in payload["voices"] if voice["id"] == "af_heart")
+        self.assertTrue(heart["sample_available"])
+        sample = self.client.get(heart["sample_url"])
+        self.assertEqual(sample.status_code, 200)
+        self.assertIn("immutable", sample.headers["cache-control"])
+
+    def test_project_upload_list_and_delete(self) -> None:
+        project = self._upload_project()
         self.assertTrue(Path(project["source_video"]).is_file())
+        self.assertEqual(project["tts_voice"], "af_heart")
+        self.assertEqual(project["tts_language"], "a")
 
         listed = self.client.get("/api/projects").json()["projects"]
         self.assertEqual(
@@ -65,6 +101,110 @@ class ApiTests(unittest.TestCase):
         deleted = self.client.delete(f"/api/projects/{project['project_id']}")
         self.assertEqual(deleted.status_code, 204)
         self.assertEqual(self.client.get("/api/projects").json()["projects"], [])
+
+    def test_project_rename_preserves_stable_id(self) -> None:
+        project = self._upload_project()
+
+        response = self.client.patch(
+            f"/api/projects/{project['project_id']}",
+            json={"title": "  Launch   walkthrough  "},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        renamed = response.json()
+        self.assertEqual(renamed["project_id"], project["project_id"])
+        self.assertEqual(renamed["title"], "Launch walkthrough")
+        self.assertEqual(
+            self.client.get(f"/api/projects/{project['project_id']}").json()["title"],
+            "Launch walkthrough",
+        )
+
+    def test_active_job_can_be_reattached_after_browser_refresh(self) -> None:
+        project = self._upload_project()
+        job = api_module.jobs.create(str(project["project_id"]), "transcription")
+
+        response = self.client.get(
+            f"/api/projects/{project['project_id']}/jobs/active"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["job"]["id"], job.id)
+        listed = self.client.get("/api/projects").json()["projects"][0]
+        loaded = self.client.get(f"/api/projects/{project['project_id']}").json()
+        self.assertEqual(listed["active_job"]["id"], job.id)
+        self.assertEqual(loaded["active_job"]["kind"], "transcription")
+
+    def test_latest_job_preserves_failed_processing_phase(self) -> None:
+        project = self._upload_project()
+        job = api_module.jobs.create(str(project["project_id"]), "transcription")
+        api_module.jobs.update(
+            job.id,
+            status="failed",
+            message="Transcription failed",
+            failed_at="Cleaning transcript",
+            error="Cleanup provider timed out",
+        )
+
+        response = self.client.get(
+            f"/api/projects/{project['project_id']}/jobs/latest"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        latest = response.json()["job"]
+        self.assertEqual(latest["id"], job.id)
+        self.assertEqual(latest["failed_at"], "Cleaning transcript")
+        self.assertEqual(latest["error"], "Cleanup provider timed out")
+
+    def test_transcript_exports_work_before_render(self) -> None:
+        project_payload = self._upload_project()
+        project = api_module._project(str(project_payload["project_id"]))
+        cue = Cue(
+            index=0,
+            start_seconds=0,
+            end_seconds=1.5,
+            text="Edited words",
+            original_text="Original words",
+        )
+        save_project_state(
+            project.model_copy(
+                update={"stage": "edit", "transcript_cues": [cue.model_dump()]}
+            )
+        )
+
+        txt = self.client.get(f"/api/projects/{project.project_id}/exports/txt")
+        srt = self.client.get(f"/api/projects/{project.project_id}/exports/srt")
+
+        self.assertEqual(txt.status_code, 200)
+        self.assertIn("Edited words", txt.text)
+        self.assertEqual(srt.status_code, 200)
+        self.assertIn("00:00:00,000 --> 00:00:01,500", srt.text)
+
+    @patch("apps.api.main.RenderWorkflow")
+    def test_render_uses_the_project_voice_and_accent(self, workflow: object) -> None:
+        project_payload = self._upload_project()
+        project = api_module._project(str(project_payload["project_id"]))
+        cue = Cue(
+            index=0,
+            start_seconds=0,
+            end_seconds=1,
+            text="Hello",
+            original_text="Hello",
+        )
+        project = project.model_copy(
+            update={
+                "tts_voice": "bf_emma",
+                "tts_language": "b",
+                "transcript_cues": [cue.model_dump()],
+            }
+        )
+        workflow.return_value.run.return_value = RenderArtifacts()
+        job = api_module.jobs.create(project.project_id, "render")
+
+        api_module._run_render(job.id, project)
+
+        render_settings = workflow.call_args.kwargs["settings"]
+        self.assertEqual(render_settings.kokoro_voice, "bf_emma")
+        self.assertEqual(render_settings.kokoro_lang_code, "b")
 
     def test_upload_rejects_unsupported_extension(self) -> None:
         response = self.client.post(

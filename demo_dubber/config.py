@@ -20,11 +20,21 @@ class Settings(BaseSettings):
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     kokoro_voice: str = Field(default="af_heart", alias="KOKORO_VOICE")
     kokoro_speed: float = Field(default=1.0, gt=0, alias="KOKORO_SPEED")
+    min_kokoro_speed: float = Field(
+        default=0.8, gt=0, alias="DEMO_DUBBER_MIN_KOKORO_SPEED"
+    )
     max_kokoro_speed: float = Field(
         default=1.25, gt=0, alias="DEMO_DUBBER_MAX_KOKORO_SPEED"
     )
     kokoro_lang_code: str = Field(default="a", alias="KOKORO_LANG_CODE")
     kokoro_repo_id: str = Field(default="hexgrad/Kokoro-82M", alias="KOKORO_REPO_ID")
+    kokoro_voice_catalog: Path = Field(
+        default=Path("assets/kokoro_voices.json"),
+        alias="DEMO_DUBBER_VOICE_CATALOG",
+    )
+    kokoro_voice_samples_dir: Path = Field(
+        default=Path("voice_samples"), alias="DEMO_DUBBER_VOICE_SAMPLES"
+    )
     workspace_dir: Path = Field(
         default=Path("workspace"), alias="DEMO_DUBBER_WORKSPACE"
     )
@@ -104,6 +114,10 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_quality_limits(self) -> Settings:
+        if self.min_kokoro_speed > self.kokoro_speed:
+            raise ValueError(
+                "DEMO_DUBBER_MIN_KOKORO_SPEED must not exceed KOKORO_SPEED"
+            )
         if self.max_kokoro_speed < self.kokoro_speed:
             raise ValueError(
                 "DEMO_DUBBER_MAX_KOKORO_SPEED must be at least KOKORO_SPEED"

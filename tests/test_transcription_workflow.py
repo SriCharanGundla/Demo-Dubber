@@ -46,6 +46,32 @@ class _IdentityCleaner:
 
 
 class TranscriptionWorkflowTests(unittest.TestCase):
+    def test_short_audio_reports_distinct_processing_phases(self) -> None:
+        updates: list[tuple[str, int | None, int | None]] = []
+        workflow = TranscriptionWorkflow(
+            ffmpeg=_FakeFFmpeg(),
+            transcriber=_FakeTranscriber(),
+            cleaner=_IdentityCleaner(),
+            progress_callback=lambda message, completed, total: updates.append(
+                (message, completed, total)
+            ),
+        )
+
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            workflow.run(root / "video.mp4", root)
+
+        self.assertEqual(
+            updates,
+            [
+                ("Preparing audio", 0, 4),
+                ("Transcribing audio", 1, 4),
+                ("Cleaning transcript", 2, 4),
+                ("Validating transcript", 3, 4),
+                ("Transcript ready", 4, 4),
+            ],
+        )
+
     def test_long_audio_is_chunked_offset_and_renumbered(self) -> None:
         workflow = TranscriptionWorkflow(
             ffmpeg=_FakeFFmpeg(),
