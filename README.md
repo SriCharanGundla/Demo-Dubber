@@ -1,50 +1,48 @@
 # Demo Dubber
 
-Demo Dubber turns a narrated demo video into an editable, timestamp-safe transcript and a Kokoro-voiced MP4. It combines a React web client, FastAPI backend, and shared Python processing services. The original Streamlit app remains available under the `streamlit-v1` tag.
+Demo Dubber turns narrated demo videos into editable transcripts and
+Kokoro-voiced MP4s while preserving cue timing and video quality.
 
-## Architecture
+## Features
 
-```text
-apps/
-  api/          FastAPI HTTP API and local background-job adapter
-  web/          Vite + React JavaScript + Tailwind CSS v4 + shadcn-style UI
-  streamlit/    compatibility entry point for the original interface
-demo_dubber/    shared models, media, transcription, cleanup, and render services
-tests/          workflow, safety, provider, and API contract tests
-```
+- Resume projects across upload, transcription, editing, and export stages.
+- Transcribe with OpenAI or local Whisper on CPU, NVIDIA CUDA, or Apple Silicon.
+- Clean transcripts with OpenAI, Gemini AI Studio, or OpenRouter.
+- Preview and select from 28 English Kokoro voices.
+- Edit timestamped cues and export MP4, SRT, TXT, and narration WAV files.
 
-The backend exposes project, transcription, transcript editing, rendering, job polling, provider, health, and contained artifact-download endpoints. Interactive API documentation is at `http://localhost:8000/docs`.
+## Quick start
 
-The React app uses a resumable four-stage flow:
-
-1. `/projects` — upload, rename, delete, and resume projects.
-2. `/projects/:id/transcribe` — choose providers and monitor transcription phases.
-3. `/projects/:id/transcript` — edit cues, compare original media with fitted TTS, and download SRT/TXT.
-4. `/projects/:id/export` — render, preview, and download the dubbed video and supporting files.
-
-Renaming changes only the displayed title. The project ID and URLs stay stable.
-
-## Quick start with Docker
-
-Requirements: Docker Desktop or OrbStack, plus a key for each hosted provider you select.
+Requirements: Docker Desktop or OrbStack, plus API keys for any hosted providers
+you select.
 
 ```bash
 cp .env.example .env
 ./deploy.sh
 ```
 
-Open `http://localhost:8000`. The first image build downloads the transcription and Kokoro models; later builds reuse Docker's cached layers.
+Open `http://localhost:8000`. The first build downloads the Whisper and Kokoro
+models; Docker caches them for later builds.
 
-## Develop from source
+## Configuration
 
-Requirements:
+Choose providers in `.env` or from the app:
 
-- Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22+, and pnpm 11+
-- `ffmpeg` and `ffprobe`
-- An OpenAI key for hosted transcription, or a supported local transcription backend
-- A key for the selected transcript-cleanup provider
+| Task | Options |
+| --- | --- |
+| Transcription | OpenAI, local faster-whisper, MLX Whisper |
+| Transcript cleanup | OpenAI, Gemini AI Studio, OpenRouter |
+| Narration | 28 American and British English Kokoro voices |
 
-Install dependencies and start both development servers:
+Add keys only for the hosted providers you use. See
+[`.env.example`](./.env.example) for every setting and
+[`docs/configuration.md`](./docs/configuration.md) for device, provider, Docker,
+and runtime details.
+
+## Development
+
+Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 22+,
+pnpm 11+, `ffmpeg`, and `ffprobe`.
 
 ```bash
 cp .env.example .env
@@ -53,131 +51,34 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://localhost:5173`. Vite proxies `/api` to FastAPI on port 8000.
+Open `http://localhost:5173`. Useful commands:
 
 ```bash
-pnpm lint       # Ruff + ESLint, with zero warnings allowed
-pnpm test       # Python unit and API contract tests
-pnpm build      # Vite production build
-pnpm dev:api    # FastAPI only
-pnpm dev:web    # React only
+pnpm lint
+pnpm test
+pnpm build
+pnpm dev:api
+pnpm dev:web
 ```
 
-The Streamlit fallback remains available:
+Interactive API documentation is available at `http://localhost:8000/docs`.
+The original Streamlit interface remains under the `streamlit-v1` tag.
 
-```bash
-uv run streamlit run app.py
-# or: uv run streamlit run apps/streamlit/app.py
-```
+## How it works
 
-### Local transcription devices
+1. FFmpeg extracts audio from the uploaded video.
+2. The selected provider transcribes and safely cleans timestamped cues.
+3. Cue edits retain timing-derived character budgets and fitted TTS previews.
+4. Kokoro narration is duration-matched and muxed with the source video.
 
-Both UIs detect the transcription backends available on the current machine.
-The environment setting controls the default selection:
+Compatible source video is stream-copied during export. Other formats use a
+high-quality fallback. Project state and completed artifacts remain resumable
+from disk.
 
-```env
-# auto | cpu | cuda | mps
-DEMO_DUBBER_TRANSCRIPTION_PROVIDER=local
-DEMO_DUBBER_LOCAL_WHISPER_DEVICE=auto
+## Architecture
 
-# faster-whisper settings for auto, cpu, and cuda
-DEMO_DUBBER_LOCAL_WHISPER_MODEL=medium.en
-DEMO_DUBBER_LOCAL_WHISPER_COMPUTE_TYPE=int8
-DEMO_DUBBER_LOCAL_WHISPER_AUTO_COMPUTE_TYPE=auto
-
-# MLX model used when device=mps on Apple Silicon
-DEMO_DUBBER_MLX_WHISPER_MODEL=mlx-community/whisper-medium.en-mlx
-```
-
-- `cpu` uses faster-whisper with CTranslate2.
-- `cuda` uses faster-whisper on a detected NVIDIA GPU.
-- `mps` or `metal` routes to MLX Whisper on Apple Silicon.
-- `auto` lets CTranslate2 choose its faster-whisper device. Set `mps` when MLX
-  should be the default on a Mac.
-
-## Cleanup providers
-
-All cleanup responses are validated locally to preserve cue order, adjacent coverage, speaker boundaries, and trusted timestamps.
-
-- `openai`: OpenAI Responses API with strict JSON Schema.
-- `gemini`: Gemini AI Studio's OpenAI-compatible Chat Completions endpoint.
-- `openrouter`: OpenRouter's OpenAI-compatible endpoint. The adapter requests providers that support structured parameters, then safely falls back to prompt-constrained JSON if the selected model rejects JSON Schema.
-
-Gemini and OpenRouter compatibility is covered by mocked request/validation contract tests. Live calls require your own keys and incur provider usage; select the configured provider in either UI to perform an end-to-end check.
-
-Key environment variables:
-
-```env
-OPENAI_API_KEY=
-DEMO_DUBBER_TRANSCRIPTION_PROVIDER=openai
-DEMO_DUBBER_CLEANUP_PROVIDER=openai
-
-GEMINI_API_KEY=
-GEMINI_OPENAI_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
-GEMINI_MODEL=gemini-3.7-flash
-
-OPENROUTER_API_KEY=
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
-OPENROUTER_MODEL=google/gemini-3.7-flash
-OPENROUTER_SITE_URL=
-OPENROUTER_APP_NAME=Demo Dubber
-
-```
-
-See [.env.example](./.env.example) for transcription, timing, Kokoro, workspace, and CORS settings.
-
-## Processing behavior
-
-1. The source video is saved under a contained per-project output directory.
-2. FFmpeg extracts mono audio; long recordings are transcribed in overlapping chunks.
-3. Cleanup may correct wording and merge adjacent cues, but cannot alter timeline coverage.
-4. Cue edits retain character budgets derived from timing.
-5. The selected American or British Kokoro voice is retained per project; narration duration-matches short cues within a quality floor, then schedules all cues globally with bounded silence, speed, and tempo adjustments.
-6. The app exports TXT, SRT, narration WAV, and a muxed MP4 that stream-copies compatible source video or uses a high-quality fallback.
-
-Project state and artifacts live under `outputs/`. Temporary workspace data lives under `workspace/`. Both can be relocated with environment variables.
-
-Uploads are validated for file size, playable duration, video dimensions, and
-FFmpeg execution time. The defaults support files up to 2 GiB, four hours, and
-8K resolution; override them with the limits documented in `.env.example`.
-
-Preview audio, render segments, and transcription chunks can be inspected or
-removed after a retention window:
-
-```bash
-uv run python scripts/cleanup_generated.py --older-than-days 30
-uv run python scripts/cleanup_generated.py --older-than-days 30 --apply
-```
-
-## Docker details
-
-`deploy.sh` builds the supported FastAPI + compiled React image.
-
-The deployment binds to `127.0.0.1` by default so project media and processing
-operations are not exposed to the local network.
-
-The build downloads the configured faster-whisper model, Kokoro model, and all
-28 Kokoro English voice packs into the image. It also renders each voice's
-picker sample once at build time. Docker reuses those immutable model and audio
-layers on later builds, so playing a sample never invokes TTS at runtime.
-Project outputs and workspace data remain in the repo's existing `outputs/`
-and `workspace/` directories; the baked model cache is intentionally not hidden
-by a runtime volume.
-
-Docker Desktop and OrbStack run Linux containers, so macOS Metal and MLX Whisper
-are unavailable inside Docker—even on Apple Silicon. The deployment forces
-CPU `faster-whisper` with `int8`. `Dockerfile.streamlit` remains available for
-manual compatibility builds, but `deploy.sh` runs only the React web app.
-
-## Deployment notes
-
-Rendering and transcription continue when the browser tab is closed, as long as
-the Docker container remains running. Reopening a project reconnects the UI to
-an active job, and completed artifacts remain resumable from disk.
-
-The API persists job outcomes under `outputs/.jobs.json`. Restarting the
-container marks an interrupted active job as failed with its last processing
-phase, while completed project data and render checkpoints remain on disk.
+Demo Dubber is a pnpm/uv monorepo with a Vite React client, FastAPI backend,
+shared Python media services, and a compatibility Streamlit entry point.
 
 ## License
 
