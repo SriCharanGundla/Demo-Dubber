@@ -12,7 +12,8 @@ PREWARM_WHISPER=${PREWARM_WHISPER:-1}
 BUILD_RETRIES=${BUILD_RETRIES:-3}
 HOST_OUTPUTS_DIR=${HOST_OUTPUTS_DIR:-"$SCRIPT_DIR/outputs"}
 HOST_WORKSPACE_DIR=${HOST_WORKSPACE_DIR:-"$SCRIPT_DIR/workspace"}
-CA_BUNDLE=${CA_BUNDLE:-${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}}
+# Use the freshly installed image trust store unless a custom bundle is explicitly supplied.
+CA_BUNDLE=${CA_BUNDLE:-}
 
 env_value() {
   key=$1
