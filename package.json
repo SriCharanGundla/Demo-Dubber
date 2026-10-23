@@ -12,6 +12,6 @@
     "test": "uv run python -m unittest discover -s tests -v"
   },
   "devDependencies": {
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.5"
   }
 }
